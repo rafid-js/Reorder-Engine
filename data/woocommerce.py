@@ -109,6 +109,9 @@ def pull_orders() -> list[dict]:
 
         try:
             order_date = datetime.fromisoformat(order_date_str.replace("Z", "+00:00"))
+            # WC returns local server time without timezone — normalize to UTC
+            if order_date.tzinfo is None:
+                order_date = order_date.replace(tzinfo=timezone.utc)
         except (ValueError, AttributeError):
             order_date = None
 
@@ -149,7 +152,7 @@ def pull_product_categories() -> dict[str, str]:
     logger.info("Pulling WooCommerce product categories...")
 
     try:
-        products = _wc_get("products", {"status": "publish", "type": "simple,variable"})
+        products = _wc_get("products", {"status": "publish"})
     except RuntimeError as exc:
         logger.error("Failed to pull WooCommerce product categories: %s", exc)
         return {}

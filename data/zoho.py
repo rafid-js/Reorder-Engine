@@ -122,7 +122,7 @@ def pull_purchase_orders() -> dict[str, dict]:
         return {}
 
     try:
-        purchase_orders = _zoho_get("purchaseorders", access_token, {"status": "open,billed,closed"})
+        purchase_orders = _zoho_get("purchaseorders", access_token)
     except RuntimeError as exc:
         logger.error("Failed to pull Zoho purchase orders: %s", exc)
         return {}

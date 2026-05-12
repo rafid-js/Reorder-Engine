@@ -182,6 +182,8 @@ def pull_flagged() -> dict[str, dict[str, int]]:
         )
         try:
             shipment_date = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+            if shipment_date.tzinfo is None:
+                shipment_date = shipment_date.replace(tzinfo=timezone.utc)
         except (ValueError, AttributeError):
             shipment_date = None
 
@@ -248,6 +250,8 @@ def pull_wc_refunded() -> dict[str, dict[str, int]]:
         date_str = order.get("date_created", "")
         try:
             order_date = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+            if order_date.tzinfo is None:
+                order_date = order_date.replace(tzinfo=timezone.utc)
         except (ValueError, AttributeError):
             order_date = None
 
