@@ -23,14 +23,16 @@ _BST = pytz.timezone(config.TIMEZONE)
 def run_pipeline() -> None:
     """
     Full reorder pipeline:
-      1. Pull data from WooCommerce, Nuport, Zoho Books
-      2. Merge by SKU
-      3. Compute velocity + urgency tiers
-      4. Compute reorder quantities
-      5. Get Claude AI recommendations
-      6. Write to Google Sheets
-      7. Send Gmail briefing
-      8. Send WhatsApp alert (if RED/YELLOW SKUs exist)
+      1.  Pull WooCommerce orders, Nuport shipments + flagged, Zoho Books
+      2.  Merge all sources by SKU
+      3.  Compute per-SKU return rates + early warning signals
+      4.  Compute velocity (using per-SKU return rates)
+      5.  Compute reorder quantities
+      6.  Get Claude reorder recommendations (CRITICAL/WARNING SKUs)
+      7.  Get Claude return analysis (early warning SKUs)
+      8.  Write to Google Sheets
+      9.  Send Gmail briefing (with return warnings section)
+      10. Send WhatsApp alert
     """
     start_time = datetime.now(_BST)
     logger.info("=" * 60)
@@ -41,6 +43,7 @@ def run_pipeline() -> None:
     wc_orders = []
     nuport_shipments = []
     nuport_preorders = {}
+    nuport_flagged = {}
     nuport_stock = {}
     zoho_pos = {}
     missing_sources = []
@@ -60,12 +63,21 @@ def run_pipeline() -> None:
         from data.nuport import pull_shipments
         nuport_shipments, nuport_preorders = pull_shipments()
         sku_count = len({r["sku"] for r in nuport_shipments})
-        preorder_count = len(nuport_preorders)
-        print(f"Done. {sku_count} SKUs in shipments, {preorder_count} SKUs with pre-orders.")
+        print(f"Done. {sku_count} SKUs in shipments, {len(nuport_preorders)} SKUs with pre-orders.")
     except Exception as exc:
         print("FAILED.")
         logger.error("Nuport shipments pull failed: %s", exc)
         missing_sources.append("Nuport (shipments)")
+
+    print("Pulling Nuport flagged data (returns + COD refused)...", end=" ", flush=True)
+    try:
+        from data.returns import pull_flagged
+        nuport_flagged = pull_flagged()
+        print(f"Done. {len(nuport_flagged)} SKUs with return/refusal records.")
+    except Exception as exc:
+        print("FAILED.")
+        logger.error("Nuport flagged pull failed: %s", exc)
+        missing_sources.append("Nuport (flagged)")
 
     print("Pulling Nuport stock levels...", end=" ", flush=True)
     try:
@@ -104,34 +116,43 @@ def run_pipeline() -> None:
         _send_error_alert("No SKU data available — all data sources failed or returned empty.")
         return
 
-    # ── 3. Velocity + urgency ─────────────────────────────────────────────────
+    # ── 3. Per-SKU return rates + early warning signals ───────────────────────
+    print("Computing per-SKU return rates and early warning signals...", end=" ", flush=True)
+    from engine.return_signals import compute_return_rates, get_warning_skus
+    merged = compute_return_rates(merged, nuport_flagged)
+    warning_skus = get_warning_skus(merged)
+    hold_count = sum(1 for s in merged if s.get("hold_for_review"))
+    print(f"Done. {len(warning_skus)} early warnings, {hold_count} hold flags.")
+
+    # ── 4. Velocity + urgency (uses per-SKU return rates from step 3) ─────────
     print("Computing velocity and urgency tiers...", end=" ", flush=True)
     from engine.velocity import compute_velocity
     enriched = compute_velocity(merged)
     print("Done.")
 
-    # ── 4. Reorder quantities ─────────────────────────────────────────────────
+    # ── 5. Reorder quantities ─────────────────────────────────────────────────
     print("Computing reorder quantities...", end=" ", flush=True)
     from engine.reorder import compute_reorder_quantities
     enriched = compute_reorder_quantities(enriched)
     print("Done.")
 
-    # ── 5. Claude AI recommendations (only for actionable SKUs) ───────────────
+    # ── 6. Claude reorder recommendations ────────────────────────────────────
     from engine.velocity import filter_actionable
     actionable = filter_actionable(enriched)
 
-    print(f"Getting Claude AI recommendations for {len(actionable)} actionable SKUs...", end=" ", flush=True)
-    from engine.intelligence import get_recommendations, merge_recommendations
+    print(f"Getting Claude reorder recommendations for {len(actionable)} actionable SKUs...", end=" ", flush=True)
+    from engine.intelligence import (
+        get_recommendations, merge_recommendations,
+        get_return_analysis, merge_return_analysis,
+    )
     recs = get_recommendations(actionable)
     if recs is None:
         print("FAILED — proceeding without AI recommendations.")
     else:
         print(f"Done. {len(recs)} recommendations received.")
-
-    # Merge recommendations back into actionable list, then rebuild full list
     merge_recommendations(actionable, recs)
 
-    # Healthy SKUs don't get AI recs — just add empty fields
+    # Fill empty Claude fields for non-actionable (HEALTHY) SKUs
     actionable_skus = {s["sku"] for s in actionable}
     for s in enriched:
         if s["sku"] not in actionable_skus:
@@ -143,7 +164,34 @@ def run_pipeline() -> None:
             s.setdefault("claude_supplier_note", "")
             s.setdefault("claude_action_note", "")
 
-    # ── 6. Google Sheets ──────────────────────────────────────────────────────
+    # ── 7. Claude return analysis (early warning SKUs only) ───────────────────
+    # Resolve warning_skus refs to enriched objects (which now have velocity data)
+    enriched_map = {s["sku"]: s for s in enriched}
+    warning_skus_enriched = [enriched_map[s["sku"]] for s in warning_skus if s["sku"] in enriched_map]
+
+    if warning_skus_enriched:
+        print(f"Getting Claude return analysis for {len(warning_skus_enriched)} warning SKUs...", end=" ", flush=True)
+        return_analysis = get_return_analysis(warning_skus_enriched)
+        if return_analysis is None:
+            print("FAILED — proceeding without return analysis.")
+        else:
+            print(f"Done. {len(return_analysis)} analyses received.")
+        merge_return_analysis(warning_skus_enriched, return_analysis)
+    else:
+        print("No return early warnings — skipping return analysis.")
+
+    # Ensure all SKUs have return analysis placeholder fields
+    for s in enriched:
+        s.setdefault("claude_return_diagnosis", "N/A")
+        s.setdefault("claude_return_analysis", "")
+        s.setdefault("claude_return_hold", s.get("hold_for_review", False))
+        s.setdefault("claude_return_investigate", False)
+        s.setdefault("claude_return_action", "")
+
+    # Final warning list with enriched data
+    warning_skus_final = [s for s in enriched if s.get("return_early_warning")]
+
+    # ── 8. Google Sheets ──────────────────────────────────────────────────────
     print("Writing to Google Sheets...", end=" ", flush=True)
     try:
         from outputs.sheets import write_to_sheets
@@ -153,21 +201,21 @@ def run_pipeline() -> None:
         print("FAILED.")
         logger.error("Sheets write failed (non-fatal): %s", exc)
 
-    # ── 7. Email briefing ─────────────────────────────────────────────────────
+    # ── 9. Email briefing ─────────────────────────────────────────────────────
     print("Sending email briefing...", end=" ", flush=True)
     try:
         from outputs.email import send_email
-        send_email(enriched)
+        send_email(enriched, warning_skus_final)
         print("Done.")
     except Exception as exc:
         print("FAILED.")
         logger.error("Email send failed (non-fatal): %s", exc)
 
-    # ── 8. WhatsApp alert ─────────────────────────────────────────────────────
+    # ── 10. WhatsApp alert ────────────────────────────────────────────────────
     print("Sending WhatsApp alert...", end=" ", flush=True)
     try:
         from outputs.whatsapp import send_whatsapp_alert
-        send_whatsapp_alert(enriched)
+        send_whatsapp_alert(enriched, warning_skus_final)
         print("Done.")
     except Exception as exc:
         print("FAILED.")
@@ -176,11 +224,14 @@ def run_pipeline() -> None:
     elapsed = (datetime.now(_BST) - start_time).total_seconds()
     logger.info(
         "Reorder Engine run complete in %.1fs. "
-        "Critical: %d | Warning: %d | Healthy: %d",
+        "Critical: %d | Warning: %d | Healthy: %d | "
+        "Return warnings: %d | Hold flags: %d",
         elapsed,
         sum(1 for s in enriched if s.get("urgency_tier") == "CRITICAL"),
         sum(1 for s in enriched if s.get("urgency_tier") == "WARNING"),
         sum(1 for s in enriched if s.get("urgency_tier") == "HEALTHY"),
+        len(warning_skus_final),
+        sum(1 for s in enriched if s.get("hold_for_review")),
     )
     logger.info("=" * 60)
 

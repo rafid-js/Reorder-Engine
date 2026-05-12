@@ -112,12 +112,18 @@ NUPORT_ACTIVE_STATUSES = ["pending", "on-hold", "in-transit", "delivered"]
 # on-hold in Nuport = pre-orders; tracked separately for demand forecasting
 NUPORT_PREORDER_STATUS = "on-hold"
 
-# ── Cancellation & return rate buffer ─────────────────────────────────────────
+# ── Cancellation rate (global, applied to all SKUs) ───────────────────────────
 # ~15% of orders cancel before delivery (Nuport: cancelled = no-answer / rejected)
-# ~15% of delivered orders are returned (Nuport: flagged = return)
-# These rates adjust raw velocity down to true net consumption velocity,
-# preventing over-ordering based on ghost demand that never converts.
-CANCEL_RATE = 0.150   # orders that cancel before delivery
-RETURN_RATE = 0.150   # delivered orders that come back as returns
-# Net fulfillment multiplier: only this fraction of placed orders consume stock
-NET_FULFILLMENT_RATE = (1 - CANCEL_RATE) * (1 - RETURN_RATE)  # ≈ 0.7225
+CANCEL_RATE = 0.150
+
+# ── Per-SKU return rate thresholds ────────────────────────────────────────────
+# Return rates are now computed per SKU from Nuport flagged data.
+# RETURN_RATE_FALLBACK is used for new products with no flagged history.
+RETURN_RATE_FALLBACK = 0.35    # conservative default for new/data-less SKUs
+
+# Early warning: flag SKU if 7-day rate exceeds 30-day rate by this many points
+RETURN_EARLY_WARNING_THRESHOLD = 0.10   # 10 percentage points
+
+# Cell-level color rules in Google Sheets
+RETURN_HIGH_RISK_THRESHOLD = 0.40   # >40% → orange cell "High Return Risk"
+RETURN_HOLD_THRESHOLD      = 0.50   # >50% → red cell + "⛔ Hold — Human Review Required"
