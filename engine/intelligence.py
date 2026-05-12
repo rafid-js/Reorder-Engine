@@ -49,18 +49,19 @@ def _parse_claude_response(text: str) -> list[dict] | None:
 
 
 _BATCH_SIZE = 20          # SKUs per Claude call — 20 × ~250 tokens ≈ 5k output, fits in 8192
-_BATCH_DELAY_SECONDS = 65 # wait between batches to respect per-minute rate limit
+_BATCH_DELAY_SECONDS = 35 # Haiku: 10K output tokens/min; 5K per batch → safe at 35s gap
 
 
-def _call_claude(system: str, user: str, label: str) -> list[dict] | None:
+def _call_claude(system: str, user: str, label: str, model: str | None = None) -> list[dict] | None:
     """Single Claude API call with retry logic. Returns parsed list or None."""
     last_exc: Exception | None = None
+    _model = model or config.CLAUDE_MODEL
 
     for attempt in range(1, config.MAX_API_RETRIES + 1):
         try:
-            logger.info("Calling Claude API [%s] attempt %d...", label, attempt)
+            logger.info("Calling Claude API [%s] attempt %d (model: %s)...", label, attempt, _model)
             message = _client.messages.create(
-                model=config.CLAUDE_MODEL,
+                model=_model,
                 max_tokens=8192,
                 system=system,
                 messages=[{"role": "user", "content": user}],
@@ -179,7 +180,7 @@ def get_recommendations(skus: list[dict]) -> list[dict] | None:
             "Claude reorder: batch %d/%d (%d SKUs)...", idx, total_batches, len(batch)
         )
         user_msg = _REORDER_PROMPT.format(sku_json=json.dumps(batch, indent=2))
-        result = _call_claude(_REORDER_SYSTEM, user_msg, f"reorder-batch-{idx}")
+        result = _call_claude(_REORDER_SYSTEM, user_msg, f"reorder-batch-{idx}", model=config.CLAUDE_BULK_MODEL)
         if result:
             all_results.extend(result)
             any_success = True

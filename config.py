@@ -68,7 +68,8 @@ ZOHO_ORG_ID = _require("ZOHO_ORG_ID")
 
 # ── Anthropic ─────────────────────────────────────────────────────────────────
 ANTHROPIC_API_KEY = _require("ANTHROPIC_API_KEY")
-CLAUDE_MODEL = "claude-sonnet-4-6"
+CLAUDE_MODEL = "claude-sonnet-4-6"        # used for return, size, kill-chain analysis
+CLAUDE_BULK_MODEL = "claude-haiku-4-5-20251001"  # used for bulk reorder recs (10K out/min, cheaper)
 
 # ── Google Sheets ─────────────────────────────────────────────────────────────
 GOOGLE_SHEETS_ID = _require("GOOGLE_SHEETS_ID")
