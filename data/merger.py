@@ -69,14 +69,11 @@ def merge(
         if rec.get("shipment_status", "").lower() == "delivered":
             nuport_delivered_agg[sku] += rec["quantity"]
 
-    # ── Union of all SKUs seen across all sources ─────────────────────────────
-    all_skus: set[str] = (
-        set(wc_agg.keys())
-        | set(nuport_shipped_agg.keys())
-        | set(nuport_preorders.keys())
-        | set(nuport_stock.keys())
-        | set(zoho_pos.keys())
-    )
+    # ── WooCommerce SKUs are the master list ──────────────────────────────────
+    # Nuport inventory contains old/inactive SKUs not in the active catalogue.
+    # Only process SKUs that have WooCommerce order history — this is the
+    # source of truth for what Winterfell actually sells.
+    all_skus: set[str] = set(wc_agg.keys())
 
     merged: list[dict] = []
 
