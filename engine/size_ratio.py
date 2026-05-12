@@ -1,9 +1,17 @@
 """
 Size Ratio Optimization Engine.
 
-Groups size-variant sub-SKUs (e.g. TS-042-M, TS-042-L) by parent SKU,
-computes per-size velocity and ratio, suggests production quantities,
-and flags size health issues.
+Supports two SKU variant patterns:
+
+  Pattern A — text size suffix (legacy):
+    "TS-042-XL"  →  parent="TS-042",  size="XL"
+    Last dash-segment is a recognized size token (XS/S/M/L/XL/XXL…).
+
+  Pattern B — Nuport/WooCommerce numeric variant ID:
+    "34404-53666"  →  parent="34404",  size extracted from product name
+    Last dash-segment is a 4+ digit numeric string (WooCommerce variation post
+    ID). Size is the trailing token after " - " in the product name:
+      "Chocolate Corduroy Loose Fit Pant - 30"  →  size="30"
 
 Size history (previous_qty, change_vs_last) is persisted to logs/size_history.json
 so each run can show delta vs the prior recommendation.
@@ -11,6 +19,7 @@ so each run can show delta vs the prior recommendation.
 
 import json
 import math
+import re
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
@@ -19,6 +28,12 @@ import config
 from config import logger
 
 _HISTORY_PATH = config.BASE_DIR / "logs" / "size_history.json"
+
+# Matches WooCommerce variation IDs: 4+ consecutive digits at end of SKU segment
+_VARIANT_ID_RE = re.compile(r"^\d{4,}$")
+
+# Matches trailing " - <token>" in product names
+_NAME_SIZE_RE = re.compile(r"\s*-\s*(\S+)\s*$")
 
 
 # ── History persistence ────────────────────────────────────────────────────────
@@ -47,24 +62,54 @@ def _save_size_history(data: dict[str, dict[str, int]]) -> None:
 
 # ── SKU parsing ────────────────────────────────────────────────────────────────
 
-def parse_size_variant(sku: str) -> tuple[str, str] | None:
+def _extract_size_from_name(product_name: str) -> str | None:
+    """
+    Pull the size token from a product name like 'Chocolate Corduroy Loose Fit Pant - 30'.
+    Returns uppercase string ('30', 'XL', etc.) or None if no match.
+    """
+    if not product_name:
+        return None
+    m = _NAME_SIZE_RE.search(product_name.strip())
+    return m.group(1).upper() if m else None
+
+
+def parse_size_variant(sku: str, product_name: str = "") -> tuple[str, str] | None:
     """
     Extract (parent_sku, size) from a size-variant SKU.
 
-    e.g. "TS-042-XL" -> ("TS-042", "XL")
-         "TS-042"    -> None  (not a size variant)
-         "PROD-001"  -> None
+    Pattern A — text size token in SKU:
+        "TS-042-XL"   -> ("TS-042", "XL")
 
-    Returns None if last dash-segment is not a recognized size token.
+    Pattern B — numeric WooCommerce variation ID in SKU, size in product name:
+        "34404-53666" with name "... - 30" -> ("34404", "30")
+
+    Returns None if neither pattern matches.
     """
     parts = sku.split("-")
     if len(parts) < 2:
         return None
+
     last = parts[-1].upper()
-    if last not in config.KNOWN_SIZES:
-        return None
-    parent = "-".join(parts[:-1])
-    return parent, last
+
+    # Pattern A: last segment is a known size token
+    if last in config.KNOWN_SIZES:
+        return "-".join(parts[:-1]), last
+
+    # Pattern B: last segment is a 4+ digit numeric variant ID
+    if _VARIANT_ID_RE.match(parts[-1]):
+        size = _extract_size_from_name(product_name)
+        if size:
+            return "-".join(parts[:-1]), size
+
+    return None
+
+
+def _size_sort_key(size: str) -> tuple:
+    """Sort key: numeric sizes (30, 32…) by value; text sizes by SIZE_DISPLAY_ORDER."""
+    if size.isdigit():
+        return (0, int(size), "")
+    order_map = {s: i for i, s in enumerate(config.SIZE_DISPLAY_ORDER)}
+    return (1, order_map.get(size, 999), size)
 
 
 # ── Core engine ────────────────────────────────────────────────────────────────
@@ -98,10 +143,10 @@ def compute_size_ratios(
     # Build lookup: sku -> enriched dict
     sku_map: dict[str, dict] = {s["sku"]: s for s in enriched_skus}
 
-    # Group sub-SKUs by parent
+    # Group sub-SKUs by parent — pass product_name so numeric variant IDs resolve
     groups: dict[str, list[str]] = defaultdict(list)
-    for sku in sku_map:
-        parsed = parse_size_variant(sku)
+    for sku, data in sku_map.items():
+        parsed = parse_size_variant(sku, data.get("product_name", ""))
         if parsed:
             parent, _ = parsed
             groups[parent].append(sku)
@@ -126,7 +171,8 @@ def compute_size_ratios(
         total_velocity = 0.0
 
         for sub_sku in sub_skus:
-            parsed = parse_size_variant(sub_sku)
+            sub_data = sku_map[sub_sku]
+            parsed = parse_size_variant(sub_sku, sub_data.get("product_name", ""))
             if not parsed:
                 continue
             _, size = parsed
@@ -230,19 +276,14 @@ def compute_size_ratios(
 
         new_history[parent_sku] = parent_history_new
 
-        # Sort sizes by display order
-        order_map = {s: i for i, s in enumerate(config.SIZE_DISPLAY_ORDER)}
-        size_results.sort(key=lambda x: order_map.get(x["size"], 999))
+        # Sort sizes: numeric (waist/length) ascending, then text sizes by display order
+        size_results.sort(key=lambda x: _size_sort_key(x["size"]))
 
-        # Representative product name from the first sub-SKU
+        # Representative product name from the first sub-SKU with size suffix stripped
         first_sub = sku_map.get(sub_skus[0], {})
         product_name = first_sub.get("product_name", parent_sku)
-        # Strip trailing size token from product name if present
-        for size_token in config.KNOWN_SIZES:
-            suffix = f" - {size_token}"
-            if product_name.upper().endswith(suffix.upper()):
-                product_name = product_name[: -len(suffix)].strip()
-                break
+        # Strip trailing " - <size>" regardless of whether size is text or numeric
+        product_name = _NAME_SIZE_RE.sub("", product_name).strip()
 
         results.append({
             "parent_sku": parent_sku,
