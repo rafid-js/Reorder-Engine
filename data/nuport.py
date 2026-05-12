@@ -1,26 +1,23 @@
 """
-Pull shipment/delivery data and current stock levels from Nuport API.
+Pull current stock levels from Nuport integration API.
 
-Nuport is the OMS/logistics layer for Winterfell.
+Nuport integration endpoints all live under /integration/ and use a plain
+API key header (no "Bearer" prefix). Pagination is page-based (0-indexed)
+with a {count, page, pageSize, results} response envelope.
 
-Statuses pulled: pending, on-hold, in-transit, delivered
-Statuses ignored: flagged (returns), cancelled (no-answer / customer rejected)
-  — flagged = return; cancelled = customer didn't receive call or cancelled.
-    Both are excluded from demand calculation. The cancel/return rates are
-    applied as a buffer multiplier in engine/velocity.py instead.
-  — on-hold = PRE-ORDERS. Tracked separately as `preorder_qty` per SKU.
-    This is critical for Winterfell to understand committed demand before
-    the product is even in stock.
+Shipment history is NOT available via the integration API (no bulk list
+endpoint exists — only single-order lookup). WooCommerce is used for
+order velocity instead.
 
-Returns three things:
-  - shipments:    list of {sku, quantity, shipment_status, shipment_date}
-                  (all active statuses except flagged/cancelled)
-  - preorders:    dict of {sku -> preorder_qty}  (on-hold shipments only)
-  - stock:        dict of {sku -> current_stock_on_hand}
+pull_shipments() is kept as a stub returning empty data so the rest of the
+pipeline doesn't break — Nuport shipment velocity was always zero because
+the endpoint never worked. WooCommerce covers this.
+
+pull_stock() hits GET /integration/inventory and extracts SKU + quantity
+from each inventory item's nested product object.
 """
 
 import time
-from datetime import datetime, timedelta, timezone
 from collections import defaultdict
 from typing import Any
 
@@ -29,29 +26,35 @@ import requests
 import config
 from config import logger
 
+# Plain API key — NO "Bearer" prefix (Nuport integration API requirement)
 _HEADERS = {
-    "Authorization": f"Bearer {config.NUPORT_API_KEY}",
+    "Authorization": config.NUPORT_API_KEY,
     "Content-Type": "application/json",
     "Accept": "application/json",
 }
 
 
 def _nuport_get(path: str, params: dict[str, Any] | None = None) -> list[dict]:
-    """GET from Nuport API with retry + pagination support."""
+    """
+    GET from Nuport integration API with retry + page-based pagination.
+
+    Nuport response envelope: {count, page, pageSize, results}
+    Page numbering starts at 0. Pass page=-1 to get all without pagination.
+    """
     url = f"{config.NUPORT_BASE_URL}/{path.lstrip('/')}"
     params = params or {}
-    params.setdefault("limit", 100)
+    page_size = params.pop("pageSize", 50)
 
     results: list[dict] = []
-    offset = 0
+    page = 0
 
     while True:
-        params["offset"] = offset
+        request_params = {**params, "page": page, "pageSize": page_size}
         last_exc: Exception | None = None
 
         for attempt in range(1, config.MAX_API_RETRIES + 1):
             try:
-                resp = requests.get(url, params=params, headers=_HEADERS, timeout=30)
+                resp = requests.get(url, params=request_params, headers=_HEADERS, timeout=30)
                 resp.raise_for_status()
                 data = resp.json()
                 break
@@ -59,8 +62,8 @@ def _nuport_get(path: str, params: dict[str, Any] | None = None) -> list[dict]:
                 last_exc = exc
                 wait = config.RETRY_BACKOFF_BASE ** attempt
                 logger.warning(
-                    "Nuport GET %s offset %d attempt %d failed: %s — retrying in %ds",
-                    path, offset, attempt, exc, wait,
+                    "Nuport GET %s page %d attempt %d failed: %s — retrying in %ds",
+                    path, page, attempt, exc, wait,
                 )
                 time.sleep(wait)
         else:
@@ -68,147 +71,73 @@ def _nuport_get(path: str, params: dict[str, Any] | None = None) -> list[dict]:
                 f"Nuport API failed after {config.MAX_API_RETRIES} retries: {last_exc}"
             )
 
-        # Nuport may return {"results": [...], "count": N} or a plain list
         if isinstance(data, list):
             batch = data
+            total_count = len(batch)
         elif isinstance(data, dict):
-            batch = data.get("results", data.get("data", data.get("shipments", [])))
+            batch = data.get("results", [])
+            total_count = data.get("count", len(batch))
         else:
             batch = []
+            total_count = 0
 
         if not batch:
             break
 
         results.extend(batch)
 
-        if len(batch) < params["limit"]:
+        # Stop if we've got everything
+        if len(results) >= total_count or len(batch) < page_size:
             break
 
-        offset += params["limit"]
+        page += 1
 
     return results
 
 
-def _since_date() -> str:
-    cutoff = datetime.now(timezone.utc) - timedelta(days=config.LOOKBACK_DAYS)
-    return cutoff.strftime("%Y-%m-%d")
-
-
-def _extract_items(shipment: dict) -> list[dict]:
-    """Extract line items from a shipment, trying common key names."""
-    return (
-        shipment.get("items")
-        or shipment.get("line_items")
-        or shipment.get("products")
-        or []
-    )
-
-
-def _parse_date(shipment: dict) -> datetime | None:
-    date_str = (
-        shipment.get("delivered_at")
-        or shipment.get("delivery_date")
-        or shipment.get("updated_at")
-        or shipment.get("created_at")
-        or ""
-    )
-    try:
-        return datetime.fromisoformat(date_str.replace("Z", "+00:00"))
-    except (ValueError, AttributeError):
-        return None
-
-
 def pull_shipments() -> tuple[list[dict], dict[str, int]]:
     """
-    Pull all active shipments for the last LOOKBACK_DAYS.
-
-    Pulls: pending, on-hold, in-transit, delivered
-    Ignores: flagged (returns), cancelled
-
-    Returns:
-      - records:   flat list of {sku, quantity, shipment_status, shipment_date}
-      - preorders: dict of {sku -> qty} for on-hold shipments only
+    Stub — Nuport integration API has no bulk orders list endpoint.
+    WooCommerce is used for order velocity. Returns empty data.
     """
-    logger.info("Pulling Nuport shipment data...")
-
-    all_shipments: list[dict] = []
-
-    for status in config.NUPORT_ACTIVE_STATUSES:
-        try:
-            batch = _nuport_get(
-                "shipments",
-                {"from_date": _since_date(), "status": status},
-            )
-            all_shipments.extend(batch)
-            logger.info("  Nuport status='%s': %d shipments fetched.", status, len(batch))
-        except RuntimeError as exc:
-            logger.error("Failed to pull Nuport status='%s': %s", status, exc)
-
-    records: list[dict] = []
-    preorders: dict[str, int] = defaultdict(int)
-
-    for shipment in all_shipments:
-        status = shipment.get("status", "")
-        shipment_date = _parse_date(shipment)
-        is_preorder = (status.lower() == config.NUPORT_PREORDER_STATUS)
-
-        for item in _extract_items(shipment):
-            sku = (item.get("sku") or "").strip().upper()
-            if not sku:
-                continue
-
-            qty = int(item.get("quantity", 0))
-
-            if is_preorder:
-                # Pre-orders tracked separately — committed demand, not yet delivered
-                preorders[sku] += qty
-            else:
-                records.append(
-                    {
-                        "sku": sku,
-                        "quantity": qty,
-                        "shipment_status": status,
-                        "shipment_date": shipment_date,
-                    }
-                )
-
-    sku_count = len({r["sku"] for r in records})
     logger.info(
-        "Nuport shipment data pulled. %d SKUs across %d records. "
-        "%d SKUs have pre-order (on-hold) qty.",
-        sku_count, len(records), len(preorders),
+        "Nuport shipment pull skipped — no bulk list endpoint in integration API. "
+        "WooCommerce covers order velocity."
     )
-    return records, dict(preorders)
+    return [], {}
 
 
 def pull_stock() -> dict[str, int]:
     """
-    Pull current stock on hand from Nuport inventory endpoint.
+    Pull current stock on hand from GET /integration/inventory.
+
+    Each result has a nested `product` object with `sku`, and a top-level
+    `quantity` field (available stock — can be negative if oversold).
+    processingQuantity = orders being packed/shipped (reduces effective stock).
 
     Returns dict: {SKU (uppercase) -> quantity_on_hand}
     """
-    logger.info("Pulling Nuport stock levels...")
+    logger.info("Pulling Nuport stock levels from /integration/inventory...")
 
     try:
-        inventory = _nuport_get("inventory")
+        inventory = _nuport_get("integration/inventory", {"pageSize": 50})
     except RuntimeError as exc:
         logger.error("Failed to pull Nuport stock levels: %s", exc)
         return {}
 
-    stock: dict[str, int] = {}
+    stock: dict[str, int] = defaultdict(int)
 
     for item in inventory:
-        sku = (item.get("sku") or "").strip().upper()
+        product = item.get("product") or {}
+        sku = (product.get("sku") or "").strip().upper()
         if not sku:
             continue
 
-        qty = int(
-            item.get("quantity_on_hand")
-            or item.get("stock")
-            or item.get("available_quantity")
-            or 0
-        )
-        stock[sku] = stock.get(sku, 0) + qty
+        # quantity = warehouse on-hand (can be negative when oversold)
+        # processingQuantity = picked/being packed, still counts as available demand buffer
+        qty = int(item.get("quantity", 0) or 0)
+        stock[sku] += max(qty, 0)  # treat negative (oversold) as 0
 
-    logger.info("Nuport stock data pulled. %d SKUs with stock data.", len(stock))
-    return stock
+    result = dict(stock)
+    logger.info("Nuport stock data pulled. %d SKUs with stock data.", len(result))
+    return result

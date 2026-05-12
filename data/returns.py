@@ -153,64 +153,14 @@ def _since_date_iso() -> str:
 
 def pull_flagged() -> dict[str, dict[str, int]]:
     """
-    Pull Nuport flagged shipments (returns + COD refused) for last LOOKBACK_DAYS.
-
-    Returns:
-        {sku (uppercase) -> {"flagged_30d": int, "flagged_7d": int}}
-        Empty dict on API failure.
+    Nuport integration API has no bulk shipments list endpoint — returns empty
+    so pull_returns() falls through to the WooCommerce refunded fallback.
     """
-    logger.info("Pulling Nuport flagged data (returns + COD refused)...")
-
-    try:
-        flagged_shipments = _nuport_get(
-            "shipments",
-            {"from_date": _since_date_ymd(), "status": "flagged"},
-        )
-    except RuntimeError as exc:
-        logger.error("Failed to pull Nuport flagged shipments: %s", exc)
-        return {}
-
-    cutoff_7d = datetime.now(timezone.utc) - timedelta(days=7)
-    counts: dict[str, dict[str, int]] = defaultdict(lambda: {"flagged_30d": 0, "flagged_7d": 0})
-
-    for shipment in flagged_shipments:
-        date_str = (
-            shipment.get("flagged_at")
-            or shipment.get("updated_at")
-            or shipment.get("created_at")
-            or ""
-        )
-        try:
-            shipment_date = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
-            if shipment_date.tzinfo is None:
-                shipment_date = shipment_date.replace(tzinfo=timezone.utc)
-        except (ValueError, AttributeError):
-            shipment_date = None
-
-        items = (
-            shipment.get("items")
-            or shipment.get("line_items")
-            or shipment.get("products")
-            or []
-        )
-
-        for item in items:
-            sku = (item.get("sku") or "").strip().upper()
-            if not sku:
-                continue
-
-            qty = int(item.get("quantity", 0))
-            counts[sku]["flagged_30d"] += qty
-
-            if shipment_date and shipment_date >= cutoff_7d:
-                counts[sku]["flagged_7d"] += qty
-
-    result = dict(counts)
     logger.info(
-        "Nuport flagged: %d SKUs with return/refusal records.",
-        len(result),
+        "Nuport flagged pull skipped — no bulk shipments endpoint in integration API. "
+        "Falling back to WooCommerce refunded orders."
     )
-    return result
+    return {}
 
 
 # ── Fallback: WooCommerce refunded ────────────────────────────────────────────
