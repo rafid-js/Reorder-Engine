@@ -69,15 +69,21 @@ def run_pipeline() -> None:
         logger.error("Nuport shipments pull failed: %s", exc)
         missing_sources.append("Nuport (shipments)")
 
-    print("Pulling Nuport flagged data (returns + COD refused)...", end=" ", flush=True)
+    print("Pulling return data (Nuport flagged → fallback: WC refunded)...", end=" ", flush=True)
     try:
-        from data.returns import pull_flagged
-        nuport_flagged = pull_flagged()
-        print(f"Done. {len(nuport_flagged)} SKUs with return/refusal records.")
+        from data.returns import pull_returns
+        nuport_flagged, return_source = pull_returns()
+        source_note = {
+            "nuport_flagged": "Nuport flagged",
+            "wc_refunded":    "WooCommerce refunded (fallback — ~10-15% lower, WhatsApp/Messenger orders excluded)",
+            "none":           "No source available — fallback rates will apply",
+        }.get(return_source, return_source)
+        print(f"Done. {len(nuport_flagged)} SKUs. Source: {source_note}.")
     except Exception as exc:
         print("FAILED.")
-        logger.error("Nuport flagged pull failed: %s", exc)
-        missing_sources.append("Nuport (flagged)")
+        logger.error("Return data pull failed: %s", exc)
+        nuport_flagged = {}
+        missing_sources.append("return data")
 
     print("Pulling Nuport stock levels...", end=" ", flush=True)
     try:
