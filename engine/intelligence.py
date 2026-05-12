@@ -48,6 +48,10 @@ def _parse_claude_response(text: str) -> list[dict] | None:
         return None
 
 
+_BATCH_SIZE = 40          # SKUs per Claude call (keeps input well under 30k tokens)
+_BATCH_DELAY_SECONDS = 65 # wait between batches to respect per-minute rate limit
+
+
 def _call_claude(system: str, user: str, label: str) -> list[dict] | None:
     """Single Claude API call with retry logic. Returns parsed list or None."""
     last_exc: Exception | None = None
@@ -66,6 +70,14 @@ def _call_claude(system: str, user: str, label: str) -> list[dict] | None:
                 logger.info("Claude [%s] returned %d items.", label, len(recs))
                 return recs
             last_exc = ValueError("Response parse failed")
+        except anthropic.RateLimitError as exc:
+            last_exc = exc
+            wait = 60 * attempt  # back off harder on rate limit
+            logger.warning(
+                "Claude API [%s] rate limited (attempt %d) — waiting %ds",
+                label, attempt, wait,
+            )
+            time.sleep(wait)
         except anthropic.APIError as exc:
             last_exc = exc
             wait = config.RETRY_BACKOFF_BASE ** attempt
@@ -149,13 +161,39 @@ def _prepare_reorder_payload(skus: list[dict]) -> list[dict[str, Any]]:
 def get_recommendations(skus: list[dict]) -> list[dict] | None:
     """
     Reorder recommendations for CRITICAL/WARNING SKUs.
-    Returns list of dicts or None on failure.
+    Batches into chunks of _BATCH_SIZE to stay under Claude's per-minute token limit.
+    Returns merged list of dicts or None if every batch fails.
     """
     if not skus:
         return []
+
     payload = _prepare_reorder_payload(skus)
-    user_msg = _REORDER_PROMPT.format(sku_json=json.dumps(payload, indent=2))
-    return _call_claude(_REORDER_SYSTEM, user_msg, "reorder")
+    batches = [payload[i:i + _BATCH_SIZE] for i in range(0, len(payload), _BATCH_SIZE)]
+    total_batches = len(batches)
+
+    all_results: list[dict] = []
+    any_success = False
+
+    for idx, batch in enumerate(batches, start=1):
+        logger.info(
+            "Claude reorder: batch %d/%d (%d SKUs)...", idx, total_batches, len(batch)
+        )
+        user_msg = _REORDER_PROMPT.format(sku_json=json.dumps(batch, indent=2))
+        result = _call_claude(_REORDER_SYSTEM, user_msg, f"reorder-batch-{idx}")
+        if result:
+            all_results.extend(result)
+            any_success = True
+        else:
+            logger.warning("Claude reorder batch %d/%d failed — skipping.", idx, total_batches)
+
+        if idx < total_batches:
+            logger.info(
+                "Waiting %ds before next Claude batch to respect rate limit...",
+                _BATCH_DELAY_SECONDS,
+            )
+            time.sleep(_BATCH_DELAY_SECONDS)
+
+    return all_results if any_success else None
 
 
 def merge_recommendations(skus: list[dict], recs: list[dict] | None) -> list[dict]:
