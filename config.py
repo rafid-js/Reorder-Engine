@@ -127,3 +127,20 @@ RETURN_EARLY_WARNING_THRESHOLD = 0.10   # 10 percentage points
 # Cell-level color rules in Google Sheets
 RETURN_HIGH_RISK_THRESHOLD = 0.40   # >40% → orange cell "High Return Risk"
 RETURN_HOLD_THRESHOLD      = 0.50   # >50% → red cell + "⛔ Hold — Human Review Required"
+
+# ── Size ratio optimization ────────────────────────────────────────────────────
+# Recognized size tokens used to detect size variant sub-SKUs.
+# A SKU ending in one of these (after the last dash) is treated as a size variant.
+# e.g. TS-042-XL → parent=TS-042, size=XL
+KNOWN_SIZES = {"XS", "S", "M", "L", "XL", "XXL", "2XL", "3XL", "4XL", "XXXL", "XXXXL"}
+
+# Display order for sizes in reports and sheets
+SIZE_DISPLAY_ORDER = ["XS", "S", "M", "L", "XL", "XXL", "2XL", "3XL", "4XL", "XXXL", "XXXXL"]
+
+# Size health thresholds (based on 14-day sell-through)
+SIZE_VELOCITY_WINDOW = 14            # days used for size velocity + sell-through
+SIZE_FAST_MOVER_SELL_THROUGH = 0.80  # >80% sell-through in 14d → 🔥 Fast Mover
+SIZE_SLOW_MOVER_SELL_THROUGH = 0.20  # <20% sell-through in 14d → 🧊 Slow Mover
+SIZE_OVERSTOCK_DAYS = 60             # stock > 60d of velocity → ⚠️ Overstock Risk
+
+SHEETS_SIZE_TAB_NAME = "Size Intelligence"

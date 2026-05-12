@@ -134,3 +134,34 @@ def pull_orders() -> list[dict]:
     sku_count = len({r["sku"] for r in records})
     logger.info("WooCommerce data pulled. %d SKUs found across %d line items.", sku_count, len(records))
     return records
+
+
+def pull_product_categories() -> dict[str, str]:
+    """
+    Fetch WooCommerce product catalogue and return {parent_sku (uppercase) -> category_name}.
+
+    Calls /wp-json/wc/v3/products (parent products only — not variations).
+    Size variant sub-SKUs (e.g. TS-042-M) are NOT listed here; the size_ratio
+    engine maps them back to the parent SKU by stripping the size suffix.
+
+    Returns empty dict on failure (non-fatal; size engine defaults to "Uncategorized").
+    """
+    logger.info("Pulling WooCommerce product categories...")
+
+    try:
+        products = _wc_get("products", {"status": "publish", "type": "simple,variable"})
+    except RuntimeError as exc:
+        logger.error("Failed to pull WooCommerce product categories: %s", exc)
+        return {}
+
+    categories: dict[str, str] = {}
+    for product in products:
+        sku = (product.get("sku") or "").strip().upper()
+        if not sku:
+            continue
+        cats = product.get("categories", [])
+        category_name = cats[0].get("name", "Uncategorized") if cats else "Uncategorized"
+        categories[sku] = category_name
+
+    logger.info("Product categories pulled. %d parent SKUs mapped to categories.", len(categories))
+    return categories

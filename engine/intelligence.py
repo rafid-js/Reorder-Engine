@@ -1,7 +1,7 @@
 """
 Claude API intelligence layer.
 
-Two separate API calls:
+Three separate API calls:
 
 1. get_recommendations(skus)
    Reorder recommendations for CRITICAL and WARNING SKUs.
@@ -11,7 +11,11 @@ Two separate API calls:
    Diagnoses: quality issue / sizing problem / supplier batch defect.
    Recommends: hold reorder / investigate supplier / ops action.
 
-Both fall back gracefully to empty placeholder data if the API call fails.
+3. get_size_analysis(size_products)
+   Per-parent-SKU size health analysis: identifies which sizes to scale up/down,
+   flags stockout risks, and validates the suggested size ratio.
+
+All calls fall back gracefully to empty placeholder data if the API call fails.
 """
 
 import json
@@ -268,3 +272,99 @@ def merge_return_analysis(skus: list[dict], analysis: list[dict] | None) -> list
         s["claude_return_investigate"] = bool(rec.get("investigate_supplier", False))
         s["claude_return_action"] = rec.get("action", "")
     return skus
+
+
+# ── Size ratio analysis ───────────────────────────────────────────────────────
+
+_SIZE_SYSTEM = (
+    "You are Winterfell's inventory intelligence engine for a fast-fashion brand "
+    "in Bangladesh. Analyze size-variant performance data and recommend production "
+    "ratio adjustments. Be specific about which sizes to scale up or down based on "
+    "velocity data and sell-through rates. Consider stockout risk as the highest priority. "
+    "Respond with a valid JSON array only — no prose, no markdown fences."
+)
+
+_SIZE_PROMPT = """Analyze the size-variant performance for these parent SKUs.
+For each parent SKU, output a JSON object with these exact keys:
+  - parent_sku: the parent SKU string
+  - size_notes: dict of {{size: one-sentence note}} for any size with a notable flag (skip OK sizes)
+  - ratio_verdict: "OPTIMIZE" if the suggested ratio significantly differs from current sell-through | "MAINTAIN" if current distribution looks healthy
+  - top_action: one concise action for the production manager (max 20 words)
+  - risk_summary: one sentence summarizing the biggest size-level risk for this product
+
+Data context:
+  - size_ratio_pct: share of this size in overall product velocity
+  - sell_through_pct: units sold in last 14 days / (stock + units sold)
+  - health_flag: 💀 SIZE_STOCKOUT (stock=0 or days_remaining=0) | 🔥 FAST_MOVER (>80% sell-through) | 🧊 SLOW_MOVER (<20%) | ⚠️ OVERSTOCK_RISK (>60 days stock) | OK
+  - suggested_qty: ratio-normalized production recommendation
+  - days_remaining: stock days left at current net velocity
+
+Input data (JSON):
+{size_json}
+
+Return ONLY a JSON array. No extra text."""
+
+
+def _prepare_size_payload(size_products: list[dict]) -> list[dict[str, Any]]:
+    payload = []
+    for parent in size_products:
+        sizes_payload = []
+        for s in parent["sizes"]:
+            sizes_payload.append({
+                "size": s["size"],
+                "sku": s["sku"],
+                "current_stock": s["current_stock"],
+                "net_velocity_14d": s["net_velocity_14d"],
+                "size_ratio_pct": s["size_ratio_pct"],
+                "sell_through_pct": s["sell_through_pct"],
+                "days_remaining": s["days_remaining"],
+                "suggested_qty": s["suggested_qty"],
+                "health_flag": s["health_flag"],
+            })
+        payload.append({
+            "parent_sku": parent["parent_sku"],
+            "product_name": parent["product_name"],
+            "category": parent["category"],
+            "total_reorder_qty": parent["total_reorder_qty"],
+            "sizes": sizes_payload,
+        })
+    return payload
+
+
+def get_size_analysis(size_products: list[dict]) -> list[dict] | None:
+    """
+    Size health analysis for all multi-size parent SKUs.
+    Returns list of dicts keyed by parent_sku, or None on failure.
+    """
+    if not size_products:
+        return []
+    payload = _prepare_size_payload(size_products)
+    user_msg = _SIZE_PROMPT.format(size_json=json.dumps(payload, indent=2))
+    return _call_claude(_SIZE_SYSTEM, user_msg, "size-analysis")
+
+
+def merge_size_analysis(size_products: list[dict], analysis: list[dict] | None) -> list[dict]:
+    """
+    Attach Claude size analysis to each parent SKU dict and its size rows.
+    Adds: claude_ratio_verdict, claude_top_action, claude_risk_summary
+    Per-size: claude_size_note (from size_notes dict)
+    """
+    if not analysis:
+        for parent in size_products:
+            parent.setdefault("claude_ratio_verdict", "N/A")
+            parent.setdefault("claude_top_action", "")
+            parent.setdefault("claude_risk_summary", "")
+            for s in parent["sizes"]:
+                s.setdefault("claude_size_note", "")
+        return size_products
+
+    analysis_map = {r["parent_sku"]: r for r in analysis}
+    for parent in size_products:
+        rec = analysis_map.get(parent["parent_sku"], {})
+        parent["claude_ratio_verdict"] = rec.get("ratio_verdict", "N/A")
+        parent["claude_top_action"] = rec.get("top_action", "")
+        parent["claude_risk_summary"] = rec.get("risk_summary", "")
+        size_notes = rec.get("size_notes", {})
+        for s in parent["sizes"]:
+            s["claude_size_note"] = size_notes.get(s["size"], "")
+    return size_products

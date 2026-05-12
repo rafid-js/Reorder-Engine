@@ -31,7 +31,32 @@ def _get_client() -> Client:
     return Client(config.TWILIO_ACCOUNT_SID, config.TWILIO_AUTH_TOKEN)
 
 
-def _build_message(all_skus: list[dict], warning_skus: list[dict]) -> str:
+def _build_size_stockout_block(size_products: list[dict]) -> str:
+    """Return the size stockout lines for WhatsApp message, or empty string if none."""
+    stockouts = [
+        (parent, size)
+        for parent in size_products
+        for size in parent["sizes"]
+        if size["health_flag"] == "💀 SIZE_STOCKOUT"
+    ]
+    if not stockouts:
+        return ""
+
+    lines = ["", f"💀 *Size Stockouts Detected: {len(stockouts)} sizes out*"]
+    for i, (parent, size) in enumerate(stockouts[:5], start=1):
+        vel = size["net_velocity_14d"]
+        lost_daily = round(vel, 1)
+        lines.append(
+            f"{i}. {parent['product_name']} — {size['size']} — "
+            f"~{lost_daily}/day lost sales"
+        )
+    if len(stockouts) > 5:
+        lines.append(f"  ...+{len(stockouts)-5} more — see Size Intelligence tab")
+    return "\n".join(lines)
+
+
+def _build_message(all_skus: list[dict], warning_skus: list[dict],
+                   size_products: list[dict] | None = None) -> str:
     critical = [s for s in all_skus if s.get("urgency_tier") == "CRITICAL"]
     warning_tier = [s for s in all_skus if s.get("urgency_tier") == "WARNING"]
 
@@ -72,24 +97,39 @@ def _build_message(all_skus: list[dict], warning_skus: list[dict]) -> str:
             )
         lines.append("→ Details in email")
 
+    # ── Size stockout block ───────────────────────────────────────────────────
+    size_block = _build_size_stockout_block(size_products or [])
+    if size_block:
+        lines.append(size_block)
+        lines.append("→ Full size breakdown in Size Intelligence tab + email")
+
     return "\n".join(lines)
 
 
-def send_whatsapp_alert(all_skus: list[dict], warning_skus: list[dict] | None = None) -> None:
+def send_whatsapp_alert(
+    all_skus: list[dict],
+    warning_skus: list[dict] | None = None,
+    size_products: list[dict] | None = None,
+) -> None:
     """
-    Send WhatsApp alert if any CRITICAL/WARNING SKUs or return warnings exist.
+    Send WhatsApp alert if any CRITICAL/WARNING SKUs, return warnings, or size stockouts exist.
     Silently skips if everything is HEALTHY and no warnings.
     """
     warning_skus = warning_skus or []
+    size_products = size_products or []
 
     has_action = any(s.get("urgency_tier") in ("CRITICAL", "WARNING") for s in all_skus)
     has_warnings = bool(warning_skus)
+    has_size_stockouts = any(
+        s["health_flag"] == "💀 SIZE_STOCKOUT"
+        for p in size_products for s in p["sizes"]
+    )
 
-    if not has_action and not has_warnings:
-        logger.info("No CRITICAL/WARNING SKUs and no return warnings — WhatsApp alert skipped.")
+    if not has_action and not has_warnings and not has_size_stockouts:
+        logger.info("No CRITICAL/WARNING SKUs, no return warnings, no size stockouts — WhatsApp alert skipped.")
         return
 
-    message_body = _build_message(all_skus, warning_skus)
+    message_body = _build_message(all_skus, warning_skus, size_products)
     last_exc: Exception | None = None
 
     for attempt in range(1, config.MAX_API_RETRIES + 1):

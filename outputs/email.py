@@ -8,6 +8,7 @@ Email sections:
   2. 🔴 Critical SKUs table
   3. 🟡 Warning SKUs table
   4. ⚠️ Return Rate Early Warnings (only if spike SKUs exist)
+  5. 📐 Size Ratio Recommendations (only if size products exist)
 """
 
 import base64
@@ -159,7 +160,108 @@ def _build_return_warnings_section(warning_skus: list[dict]) -> str:
     </div>"""
 
 
-def build_email_html(all_skus: list[dict], warning_skus: list[dict], run_date: str) -> str:
+def _build_size_section(size_products: list[dict]) -> str:
+    """HTML section for 📐 Size Ratio Recommendations."""
+    if not size_products:
+        return ""
+
+    product_blocks = []
+    for parent in size_products:
+        sizes = parent.get("sizes", [])
+        top_action = parent.get("claude_top_action", "")
+        risk_summary = parent.get("claude_risk_summary", "")
+        verdict = parent.get("claude_ratio_verdict", "")
+
+        verdict_badge = ""
+        if verdict == "OPTIMIZE":
+            verdict_badge = '<span style="background:#e65100;color:#fff;padding:2px 6px;border-radius:3px;font-size:11px;margin-left:8px;">OPTIMIZE RATIO</span>'
+        elif verdict == "MAINTAIN":
+            verdict_badge = '<span style="background:#2e7d32;color:#fff;padding:2px 6px;border-radius:3px;font-size:11px;margin-left:8px;">MAINTAIN RATIO</span>'
+
+        size_rows = []
+        for s in sizes:
+            flag = s["health_flag"]
+            flag_color = {
+                "💀 SIZE_STOCKOUT": "#c62828",
+                "🔥 FAST_MOVER": "#e65100",
+                "🧊 SLOW_MOVER": "#1565c0",
+                "⚠️ OVERSTOCK_RISK": "#f9a825",
+            }.get(flag, "#555")
+
+            change = s.get("change_vs_last")
+            change_str = ""
+            if change is not None:
+                color = "#2e7d32" if change >= 0 else "#c62828"
+                prefix = "+" if change >= 0 else ""
+                change_str = f'<span style="color:{color};font-size:11px;">{prefix}{change}</span>'
+
+            note = s.get("claude_size_note", "")
+            size_rows.append(f"""
+            <tr style="border-bottom:1px solid #f0f0f0;">
+              <td style="padding:6px 10px;font-weight:bold;text-align:center;">{s['size']}</td>
+              <td style="padding:6px 10px;font-family:monospace;font-size:12px;">{s['sku']}</td>
+              <td style="padding:6px 10px;text-align:center;">{s['current_stock']}</td>
+              <td style="padding:6px 10px;text-align:center;">{s['net_velocity_14d']}</td>
+              <td style="padding:6px 10px;text-align:center;">{s['size_ratio_pct']}%</td>
+              <td style="padding:6px 10px;text-align:center;">{s['sell_through_pct']}%</td>
+              <td style="padding:6px 10px;text-align:center;">{'OUT' if s['days_remaining'] <= 0 else s['days_remaining']}</td>
+              <td style="padding:6px 10px;text-align:center;font-weight:bold;">{s['suggested_qty']} {change_str}</td>
+              <td style="padding:6px 10px;color:{flag_color};font-weight:bold;">{flag}</td>
+              <td style="padding:6px 10px;font-size:12px;color:#555;">{note}</td>
+            </tr>""")
+
+        size_rows_html = "".join(size_rows)
+
+        product_blocks.append(f"""
+        <div style="margin-bottom:28px;border:1px solid #e0e0e0;border-radius:6px;overflow:hidden;">
+          <div style="background:#e8eaf6;padding:10px 16px;border-bottom:1px solid #c5cae9;">
+            <strong style="font-size:14px;">{parent['parent_sku']}</strong>
+            <span style="color:#555;margin-left:8px;">{parent['product_name']}</span>
+            <span style="color:#888;margin-left:8px;font-size:12px;">[{parent['category']}]</span>
+            {verdict_badge}
+            <span style="float:right;font-size:12px;color:#555;">Total order: <strong>{parent['total_reorder_qty']}</strong> units</span>
+          </div>
+          <table border="0" cellspacing="0" cellpadding="0"
+                 style="width:100%;border-collapse:collapse;font-size:13px;">
+            <thead>
+              <tr style="background:#3949ab;color:#fff;">
+                <th style="padding:7px 10px;text-align:center;">Size</th>
+                <th style="padding:7px 10px;text-align:left;">Sub-SKU</th>
+                <th style="padding:7px 10px;text-align:center;">Stock</th>
+                <th style="padding:7px 10px;text-align:center;">Net Vel.</th>
+                <th style="padding:7px 10px;text-align:center;">Ratio %</th>
+                <th style="padding:7px 10px;text-align:center;">Sell-Through</th>
+                <th style="padding:7px 10px;text-align:center;">Days Left</th>
+                <th style="padding:7px 10px;text-align:center;">Suggested Qty</th>
+                <th style="padding:7px 10px;text-align:left;">Health</th>
+                <th style="padding:7px 10px;text-align:left;">Notes</th>
+              </tr>
+            </thead>
+            <tbody>{size_rows_html}</tbody>
+          </table>
+          {"" if not (top_action or risk_summary) else f'''
+          <div style="background:#f5f5f5;padding:8px 16px;border-top:1px solid #e0e0e0;font-size:12px;">
+            {"" if not top_action else f"<strong>Action:</strong> {top_action}&nbsp;&nbsp;"}
+            {"" if not risk_summary else f"<strong>Risk:</strong> {risk_summary}"}
+          </div>'''}
+        </div>""")
+
+    blocks_html = "".join(product_blocks)
+    return f"""
+    <div style="margin-top:30px;">
+      <div style="background:#e8eaf6;border-left:4px solid #3949ab;padding:12px 20px;margin-bottom:16px;">
+        <h2 style="margin:0;color:#1a237e;font-size:18px;">📐 Size Ratio Recommendations</h2>
+        <p style="margin:4px 0 0;color:#555;font-size:13px;">
+          Per-size velocity analysis and optimized production quantities.
+          💀 stockouts and 🔥 fast movers need immediate attention.
+        </p>
+      </div>
+      {blocks_html}
+    </div>"""
+
+
+def build_email_html(all_skus: list[dict], warning_skus: list[dict], run_date: str,
+                     size_products: list[dict] | None = None) -> str:
     critical = [s for s in all_skus if s.get("urgency_tier") == "CRITICAL"]
     warning = [s for s in all_skus if s.get("urgency_tier") == "WARNING"]
     healthy = [s for s in all_skus if s.get("urgency_tier") == "HEALTHY"]
@@ -171,6 +273,7 @@ def build_email_html(all_skus: list[dict], warning_skus: list[dict], run_date: s
     )
 
     return_warnings_html = _build_return_warnings_section(warning_skus)
+    size_section_html = _build_size_section(size_products or [])
 
     return f"""<!DOCTYPE html>
 <html>
@@ -201,6 +304,8 @@ def build_email_html(all_skus: list[dict], warning_skus: list[dict], run_date: s
 
     {return_warnings_html}
 
+    {size_section_html}
+
   </div>
 
   <div style="background:#f0f0f0;padding:14px 30px;border-top:1px solid #ddd;
@@ -213,9 +318,14 @@ def build_email_html(all_skus: list[dict], warning_skus: list[dict], run_date: s
 </html>"""
 
 
-def send_email(all_skus: list[dict], warning_skus: list[dict] | None = None) -> None:
+def send_email(
+    all_skus: list[dict],
+    warning_skus: list[dict] | None = None,
+    size_products: list[dict] | None = None,
+) -> None:
     """Build and send the daily reorder briefing email."""
     warning_skus = warning_skus or []
+    size_products = size_products or []
     critical_count = sum(1 for s in all_skus if s.get("urgency_tier") == "CRITICAL")
     warning_count = sum(1 for s in all_skus if s.get("urgency_tier") == "WARNING")
     action_count = critical_count + warning_count
@@ -225,8 +335,14 @@ def send_email(all_skus: list[dict], warning_skus: list[dict] | None = None) -> 
     subject = f"⚡ Winterfell Reorder Alert — {run_date} — {action_count} SKUs Need Action"
     if warning_skus:
         subject += f" + {len(warning_skus)} Return Warnings"
+    if size_products:
+        stockout_count = sum(
+            1 for p in size_products for s in p["sizes"] if s["health_flag"] == "💀 SIZE_STOCKOUT"
+        )
+        if stockout_count:
+            subject += f" + {stockout_count} Size Stockouts"
 
-    html_body = build_email_html(all_skus, warning_skus, run_date)
+    html_body = build_email_html(all_skus, warning_skus, run_date, size_products)
 
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject

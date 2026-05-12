@@ -23,16 +23,18 @@ _BST = pytz.timezone(config.TIMEZONE)
 def run_pipeline() -> None:
     """
     Full reorder pipeline:
-      1.  Pull WooCommerce orders, Nuport shipments + flagged, Zoho Books
+      1.  Pull WooCommerce orders + product categories, Nuport shipments + flagged, Zoho Books
       2.  Merge all sources by SKU
       3.  Compute per-SKU return rates + early warning signals
       4.  Compute velocity (using per-SKU return rates)
       5.  Compute reorder quantities
       6.  Get Claude reorder recommendations (CRITICAL/WARNING SKUs)
       7.  Get Claude return analysis (early warning SKUs)
-      8.  Write to Google Sheets
-      9.  Send Gmail briefing (with return warnings section)
-      10. Send WhatsApp alert
+      8.  Compute size ratios + get Claude size analysis
+      9.  (reserved)
+      10. Write to Google Sheets (Reorder Queue + Size Intelligence)
+      11. Send Gmail briefing (with return warnings + size section)
+      12. Send WhatsApp alert (with size stockout block)
     """
     start_time = datetime.now(_BST)
     logger.info("=" * 60)
@@ -46,17 +48,27 @@ def run_pipeline() -> None:
     nuport_flagged = {}
     nuport_stock = {}
     zoho_pos = {}
+    wc_categories = {}
     missing_sources = []
 
     print("Pulling WooCommerce data...", end=" ", flush=True)
     try:
-        from data.woocommerce import pull_orders
+        from data.woocommerce import pull_orders, pull_product_categories
         wc_orders = pull_orders()
         print(f"Done. {len({r['sku'] for r in wc_orders})} SKUs found.")
     except Exception as exc:
         print("FAILED.")
         logger.error("WooCommerce pull failed: %s", exc)
         missing_sources.append("WooCommerce")
+
+    print("Pulling WooCommerce product categories...", end=" ", flush=True)
+    try:
+        wc_categories = pull_product_categories()
+        print(f"Done. {len(wc_categories)} parent SKUs mapped.")
+    except Exception as exc:
+        print("FAILED (non-fatal).")
+        logger.warning("WooCommerce category pull failed: %s", exc)
+        wc_categories = {}
 
     print("Pulling Nuport shipment data (pending/on-hold/in-transit/delivered)...", end=" ", flush=True)
     try:
@@ -197,8 +209,29 @@ def run_pipeline() -> None:
     # Final warning list with enriched data
     warning_skus_final = [s for s in enriched if s.get("return_early_warning")]
 
-    # ── 8. Google Sheets ──────────────────────────────────────────────────────
-    print("Writing to Google Sheets...", end=" ", flush=True)
+    # ── 8. Size Ratio Optimization Engine ─────────────────────────────────────
+    print("Computing size ratios...", end=" ", flush=True)
+    from engine.size_ratio import compute_size_ratios
+    size_products = compute_size_ratios(enriched, wc_categories)
+    stockout_count = sum(
+        1 for p in size_products for s in p["sizes"] if s["health_flag"] == "💀 SIZE_STOCKOUT"
+    )
+    print(f"Done. {len(size_products)} parent SKUs, {stockout_count} size stockouts.")
+
+    if size_products:
+        print(f"Getting Claude size analysis for {len(size_products)} parent SKUs...", end=" ", flush=True)
+        from engine.intelligence import get_size_analysis, merge_size_analysis
+        size_analysis = get_size_analysis(size_products)
+        if size_analysis is None:
+            print("FAILED — proceeding without size analysis.")
+        else:
+            print(f"Done. {len(size_analysis)} analyses received.")
+        merge_size_analysis(size_products, size_analysis)
+    else:
+        print("No multi-size parent SKUs found — skipping size analysis.")
+
+    # ── 10. Google Sheets ─────────────────────────────────────────────────────
+    print("Writing to Google Sheets (Reorder Queue)...", end=" ", flush=True)
     try:
         from outputs.sheets import write_to_sheets
         write_to_sheets(enriched)
@@ -207,21 +240,31 @@ def run_pipeline() -> None:
         print("FAILED.")
         logger.error("Sheets write failed (non-fatal): %s", exc)
 
-    # ── 9. Email briefing ─────────────────────────────────────────────────────
+    if size_products:
+        print("Writing to Google Sheets (Size Intelligence)...", end=" ", flush=True)
+        try:
+            from outputs.size_sheet import write_size_sheet
+            write_size_sheet(size_products)
+            print("Done.")
+        except Exception as exc:
+            print("FAILED.")
+            logger.error("Size Intelligence sheet write failed (non-fatal): %s", exc)
+
+    # ── 11. Email briefing ────────────────────────────────────────────────────
     print("Sending email briefing...", end=" ", flush=True)
     try:
         from outputs.email import send_email
-        send_email(enriched, warning_skus_final)
+        send_email(enriched, warning_skus_final, size_products)
         print("Done.")
     except Exception as exc:
         print("FAILED.")
         logger.error("Email send failed (non-fatal): %s", exc)
 
-    # ── 10. WhatsApp alert ────────────────────────────────────────────────────
+    # ── 12. WhatsApp alert ────────────────────────────────────────────────────
     print("Sending WhatsApp alert...", end=" ", flush=True)
     try:
         from outputs.whatsapp import send_whatsapp_alert
-        send_whatsapp_alert(enriched, warning_skus_final)
+        send_whatsapp_alert(enriched, warning_skus_final, size_products)
         print("Done.")
     except Exception as exc:
         print("FAILED.")
@@ -231,13 +274,16 @@ def run_pipeline() -> None:
     logger.info(
         "Reorder Engine run complete in %.1fs. "
         "Critical: %d | Warning: %d | Healthy: %d | "
-        "Return warnings: %d | Hold flags: %d",
+        "Return warnings: %d | Hold flags: %d | "
+        "Size parents: %d | Size stockouts: %d",
         elapsed,
         sum(1 for s in enriched if s.get("urgency_tier") == "CRITICAL"),
         sum(1 for s in enriched if s.get("urgency_tier") == "WARNING"),
         sum(1 for s in enriched if s.get("urgency_tier") == "HEALTHY"),
         len(warning_skus_final),
         sum(1 for s in enriched if s.get("hold_for_review")),
+        len(size_products),
+        sum(1 for p in size_products for s in p["sizes"] if s["health_flag"] == "💀 SIZE_STOCKOUT"),
     )
     logger.info("=" * 60)
 
