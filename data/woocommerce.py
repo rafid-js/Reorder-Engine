@@ -139,6 +139,56 @@ def pull_orders() -> list[dict]:
     return records
 
 
+def pull_all_skus() -> set[str]:
+    """
+    Pull every published WooCommerce SKU — parent products + all variations.
+
+    Simple products and variable-product parent SKUs come from /products.
+    Size-variant sub-SKUs (e.g. TS-042-XL) come from /products/{id}/variations.
+
+    Returns a set of uppercase SKUs. Used as the master catalogue list so the
+    pipeline covers all 865+ active products, not just the ~460 that had orders
+    in the last 30 days.
+    """
+    logger.info("Pulling full WooCommerce product catalogue (parents + variations)...")
+
+    try:
+        products = _wc_get("products", {"status": "publish"})
+    except RuntimeError as exc:
+        logger.error("Failed to pull WooCommerce product catalogue: %s", exc)
+        return set()
+
+    skus: set[str] = set()
+    variable_ids: list[int] = []
+
+    for product in products:
+        sku = (product.get("sku") or "").strip().upper()
+        if sku:
+            skus.add(sku)
+        if product.get("type") == "variable":
+            pid = product.get("id")
+            if pid:
+                variable_ids.append(pid)
+
+    logger.info(
+        "WooCommerce catalogue: %d parent products (%d variable), fetching variations...",
+        len(products), len(variable_ids),
+    )
+
+    for pid in variable_ids:
+        try:
+            variations = _wc_get(f"products/{pid}/variations")
+            for v in variations:
+                v_sku = (v.get("sku") or "").strip().upper()
+                if v_sku:
+                    skus.add(v_sku)
+        except RuntimeError as exc:
+            logger.warning("Failed to pull variations for product %d: %s", pid, exc)
+
+    logger.info("Full WooCommerce catalogue: %d unique SKUs (parents + variations).", len(skus))
+    return skus
+
+
 def pull_product_categories() -> dict[str, str]:
     """
     Fetch WooCommerce product catalogue and return {parent_sku (uppercase) -> category_name}.

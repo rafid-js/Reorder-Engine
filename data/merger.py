@@ -34,6 +34,7 @@ def merge(
     nuport_preorders: dict[str, int],
     nuport_stock: dict[str, int],
     zoho_pos: dict[str, dict],
+    wc_all_skus: set[str] | None = None,
 ) -> list[dict]:
     """
     Merge all data sources into a unified per-SKU list.
@@ -43,6 +44,10 @@ def merge(
 
     nuport_shipments: all active (non-flagged, non-cancelled) shipment line items
     nuport_preorders: {sku -> qty} for on-hold (pre-order) shipments only
+    wc_all_skus:      full published catalogue (parents + variations); when
+                      supplied it expands the master SKU list beyond the
+                      ~460 SKUs that appeared in recent orders so that every
+                      active product gets velocity / dead-stock scoring.
     """
 
     # ── Aggregate WooCommerce orders ──────────────────────────────────────────
@@ -69,11 +74,15 @@ def merge(
         if rec.get("shipment_status", "").lower() == "delivered":
             nuport_delivered_agg[sku] += rec["quantity"]
 
-    # ── WooCommerce SKUs are the master list ──────────────────────────────────
-    # Nuport inventory contains old/inactive SKUs not in the active catalogue.
-    # Only process SKUs that have WooCommerce order history — this is the
-    # source of truth for what Winterfell actually sells.
-    all_skus: set[str] = set(wc_agg.keys())
+    # ── WooCommerce catalogue is the master SKU list ──────────────────────────
+    # Start with every published WC product (all 865+ SKUs incl. variations).
+    # Fall back to order-based SKUs only when the full catalogue wasn't fetched.
+    # Nuport inventory is excluded from the master list — it contains old/
+    # inactive SKUs no longer in the active WooCommerce catalogue.
+    if wc_all_skus:
+        all_skus: set[str] = wc_all_skus | set(wc_agg.keys())
+    else:
+        all_skus = set(wc_agg.keys())
 
     merged: list[dict] = []
 

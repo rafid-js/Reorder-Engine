@@ -43,6 +43,7 @@ def run_pipeline() -> None:
 
     # ── 1. Pull data ──────────────────────────────────────────────────────────
     wc_orders = []
+    wc_all_skus: set[str] = set()
     nuport_shipments = []
     nuport_preorders = {}
     nuport_flagged = {}
@@ -53,13 +54,22 @@ def run_pipeline() -> None:
 
     print("Pulling WooCommerce data...", end=" ", flush=True)
     try:
-        from data.woocommerce import pull_orders, pull_product_categories
+        from data.woocommerce import pull_orders, pull_product_categories, pull_all_skus
         wc_orders = pull_orders()
         print(f"Done. {len({r['sku'] for r in wc_orders})} SKUs found.")
     except Exception as exc:
         print("FAILED.")
         logger.error("WooCommerce pull failed: %s", exc)
         missing_sources.append("WooCommerce")
+
+    print("Pulling WooCommerce full product catalogue (parents + variations)...", end=" ", flush=True)
+    try:
+        wc_all_skus = pull_all_skus()
+        print(f"Done. {len(wc_all_skus)} total SKUs in catalogue.")
+    except Exception as exc:
+        print("FAILED (non-fatal — falling back to order-based SKUs).")
+        logger.warning("WooCommerce full catalogue pull failed: %s", exc)
+        wc_all_skus = set()
 
     print("Pulling WooCommerce product categories...", end=" ", flush=True)
     try:
@@ -126,7 +136,7 @@ def run_pipeline() -> None:
     # ── 2. Merge ──────────────────────────────────────────────────────────────
     print("Merging data sources...", end=" ", flush=True)
     from data.merger import merge
-    merged = merge(wc_orders, nuport_shipments, nuport_preorders, nuport_stock, zoho_pos)
+    merged = merge(wc_orders, nuport_shipments, nuport_preorders, nuport_stock, zoho_pos, wc_all_skus)
     print(f"Done. {len(merged)} unique SKUs.")
 
     if not merged:
