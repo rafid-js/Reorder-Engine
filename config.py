@@ -68,7 +68,7 @@ ZOHO_ORG_ID = _require("ZOHO_ORG_ID")
 
 # ── Anthropic ─────────────────────────────────────────────────────────────────
 ANTHROPIC_API_KEY = _require("ANTHROPIC_API_KEY")
-CLAUDE_MODEL = "claude-sonnet-4-20250514"
+CLAUDE_MODEL = "claude-sonnet-4-6"
 
 # ── Google Sheets ─────────────────────────────────────────────────────────────
 GOOGLE_SHEETS_ID = _require("GOOGLE_SHEETS_ID")
@@ -79,11 +79,11 @@ SHEETS_TAB_NAME = "Reorder Queue"
 GMAIL_SENDER = _require("GMAIL_SENDER")
 REORDER_EMAIL = _require("REORDER_EMAIL")
 
-# ── WhatsApp ──────────────────────────────────────────────────────────────────
-WHATSAPP_NUMBER = _require("WHATSAPP_NUMBER")
-TWILIO_ACCOUNT_SID = _require("TWILIO_ACCOUNT_SID")
-TWILIO_AUTH_TOKEN = _require("TWILIO_AUTH_TOKEN")
-TWILIO_WHATSAPP_FROM = _require("TWILIO_WHATSAPP_FROM")
+# ── WhatsApp (optional — leave blank to disable) ──────────────────────────────
+WHATSAPP_NUMBER = _optional("WHATSAPP_NUMBER")
+TWILIO_ACCOUNT_SID = _optional("TWILIO_ACCOUNT_SID")
+TWILIO_AUTH_TOKEN = _optional("TWILIO_AUTH_TOKEN")
+TWILIO_WHATSAPP_FROM = _optional("TWILIO_WHATSAPP_FROM")
 
 # ── Business constants ────────────────────────────────────────────────────────
 TIMEZONE = "Asia/Dhaka"

@@ -27,6 +27,10 @@ import config
 from config import logger
 
 
+def _is_configured() -> bool:
+    return bool(config.TWILIO_ACCOUNT_SID and config.TWILIO_AUTH_TOKEN and config.WHATSAPP_NUMBER)
+
+
 def _get_client() -> Client:
     return Client(config.TWILIO_ACCOUNT_SID, config.TWILIO_AUTH_TOKEN)
 
@@ -155,6 +159,10 @@ def send_whatsapp_alert(
         for s in dead_stock_skus
     )
 
+    if not _is_configured():
+        logger.info("WhatsApp not configured — skipping alert.")
+        return
+
     if not has_action and not has_warnings and not has_size_stockouts and not has_kill_chain:
         logger.info("All clear — WhatsApp alert skipped.")
         return
@@ -193,6 +201,8 @@ def send_whatsapp_alert(
 
 def send_error_alert(error_message: str) -> None:
     """Send a plain WhatsApp message if the entire run fails catastrophically."""
+    if not _is_configured():
+        return
     body = (
         "🚨 *Winterfell Reorder Engine — RUN FAILED*\n\n"
         f"Error: {error_message}\n\n"
