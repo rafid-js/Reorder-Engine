@@ -18,8 +18,11 @@ Three separate API calls:
 All calls fall back gracefully to empty placeholder data if the API call fails.
 """
 
+import hashlib
 import json
 import time
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import anthropic
@@ -28,6 +31,51 @@ import config
 from config import logger
 
 _client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
+
+# ── Cache ─────────────────────────────────────────────────────────────────────
+# Persists Claude responses for 23 hours so repeated runs (e.g. testing)
+# don't re-pay for identical inputs.
+
+_CACHE_FILE = config.BASE_DIR / "cache" / "claude_cache.json"
+_CACHE_TTL_SECONDS = 23 * 3600
+
+
+def _load_cache() -> dict:
+    try:
+        if _CACHE_FILE.exists():
+            return json.loads(_CACHE_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    return {}
+
+
+def _save_cache(cache: dict) -> None:
+    try:
+        _CACHE_FILE.parent.mkdir(exist_ok=True)
+        _CACHE_FILE.write_text(json.dumps(cache, ensure_ascii=False), encoding="utf-8")
+    except Exception as exc:
+        logger.warning("Claude cache write failed (non-fatal): %s", exc)
+
+
+def _cache_key(label: str, payload: str) -> str:
+    h = hashlib.sha256(payload.encode()).hexdigest()[:16]
+    return f"{label}:{h}"
+
+
+def _cache_get(cache: dict, key: str) -> list[dict] | None:
+    entry = cache.get(key)
+    if not entry:
+        return None
+    age = datetime.now(timezone.utc).timestamp() - entry.get("ts", 0)
+    if age > _CACHE_TTL_SECONDS:
+        return None
+    logger.info("Claude cache HIT [%s] — skipping API call (cached %dh ago).", key, int(age // 3600))
+    return entry["result"]
+
+
+def _cache_set(cache: dict, key: str, result: list[dict]) -> None:
+    cache[key] = {"ts": datetime.now(timezone.utc).timestamp(), "result": result}
+
 
 # ── Shared helpers ────────────────────────────────────────────────────────────
 
@@ -53,9 +101,22 @@ _BATCH_DELAY_SECONDS = 35 # Haiku: 10K output tokens/min; 5K per batch → safe 
 
 
 def _call_claude(system: str, user: str, label: str, model: str | None = None) -> list[dict] | None:
-    """Single Claude API call with retry logic. Returns parsed list or None."""
+    """
+    Single Claude API call with retry logic and response caching.
+
+    All calls default to CLAUDE_BULK_MODEL (Haiku) — cheaper and fast enough
+    for structured JSON generation. model param kept for future overrides.
+    Returns parsed list or None.
+    """
     last_exc: Exception | None = None
-    _model = model or config.CLAUDE_MODEL
+    _model = model or config.CLAUDE_BULK_MODEL  # default to Haiku for all calls
+
+    # ── Cache check ───────────────────────────────────────────────────────────
+    cache = _load_cache()
+    cache_key = _cache_key(label.split("-batch-")[0], user)  # batch N and batch M share key prefix
+    cached = _cache_get(cache, cache_key)
+    if cached is not None:
+        return cached
 
     for attempt in range(1, config.MAX_API_RETRIES + 1):
         try:
@@ -69,6 +130,8 @@ def _call_claude(system: str, user: str, label: str, model: str | None = None) -
             recs = _parse_claude_response(message.content[0].text)
             if recs is not None:
                 logger.info("Claude [%s] returned %d items.", label, len(recs))
+                _cache_set(cache, cache_key, recs)
+                _save_cache(cache)
                 return recs
             last_exc = ValueError("Response parse failed")
         except anthropic.RateLimitError as exc:
@@ -285,7 +348,7 @@ def get_return_analysis(warning_skus: list[dict]) -> list[dict] | None:
         return []
     payload = _prepare_return_payload(warning_skus)
     user_msg = _RETURN_PROMPT.format(sku_json=json.dumps(payload, indent=2))
-    return _call_claude(_RETURN_SYSTEM, user_msg, "return-analysis")
+    return _call_claude(_RETURN_SYSTEM, user_msg, "return-analysis", model=config.CLAUDE_BULK_MODEL)
 
 
 def merge_return_analysis(skus: list[dict], analysis: list[dict] | None) -> list[dict]:
@@ -373,13 +436,33 @@ def _prepare_size_payload(size_products: list[dict]) -> list[dict[str, Any]]:
 def get_size_analysis(size_products: list[dict]) -> list[dict] | None:
     """
     Size health analysis for all multi-size parent SKUs.
+    Batched at _BATCH_SIZE to avoid token limits.
     Returns list of dicts keyed by parent_sku, or None on failure.
     """
     if not size_products:
         return []
+
     payload = _prepare_size_payload(size_products)
-    user_msg = _SIZE_PROMPT.format(size_json=json.dumps(payload, indent=2))
-    return _call_claude(_SIZE_SYSTEM, user_msg, "size-analysis")
+    batches = [payload[i:i + _BATCH_SIZE] for i in range(0, len(payload), _BATCH_SIZE)]
+    total_batches = len(batches)
+
+    all_results: list[dict] = []
+    any_success = False
+
+    for idx, batch in enumerate(batches, start=1):
+        logger.info("Claude size analysis: batch %d/%d (%d parents)...", idx, total_batches, len(batch))
+        user_msg = _SIZE_PROMPT.format(size_json=json.dumps(batch, indent=2))
+        result = _call_claude(_SIZE_SYSTEM, user_msg, f"size-analysis-batch-{idx}", model=config.CLAUDE_BULK_MODEL)
+        if result:
+            all_results.extend(result)
+            any_success = True
+        else:
+            logger.warning("Size analysis batch %d/%d failed — skipping.", idx, total_batches)
+
+        if idx < total_batches:
+            time.sleep(_BATCH_DELAY_SECONDS)
+
+    return all_results if any_success else None
 
 
 def merge_size_analysis(size_products: list[dict], analysis: list[dict] | None) -> list[dict]:
@@ -487,6 +570,12 @@ def get_kill_chain_analysis(
     if not actionable:
         logger.info("Kill chain: all SKUs are WATCH stage — skipping Claude analysis.")
         return []
+
+    # Cap at worst 40 by score to keep API cost bounded
+    _KC_MAX_SKUS = 40
+    if len(actionable) > _KC_MAX_SKUS:
+        actionable = sorted(actionable, key=lambda s: s.get("dead_stock_score", 0), reverse=True)[:_KC_MAX_SKUS]
+        logger.info("Kill chain: capped at %d worst-scoring SKUs (of %d total actionable).", _KC_MAX_SKUS, len(dead_stock_skus))
 
     fast_movers = fast_movers or []
     fast_mover_payload = json.dumps([

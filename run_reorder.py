@@ -20,7 +20,7 @@ from config import logger
 _BST = pytz.timezone(config.TIMEZONE)
 
 
-def run_pipeline() -> None:
+def run_pipeline(no_ai: bool = False) -> None:
     """
     Full reorder pipeline:
       1.  Pull WooCommerce orders + product categories, Nuport shipments + flagged, Zoho Books
@@ -168,16 +168,21 @@ def run_pipeline() -> None:
     from engine.velocity import filter_actionable
     actionable = filter_actionable(enriched)
 
-    print(f"Getting Claude reorder recommendations for {len(actionable)} actionable SKUs...", end=" ", flush=True)
     from engine.intelligence import (
         get_recommendations, merge_recommendations,
         get_return_analysis, merge_return_analysis,
     )
-    recs = get_recommendations(actionable)
-    if recs is None:
-        print("FAILED — proceeding without AI recommendations.")
+
+    if no_ai:
+        print(f"Skipping Claude reorder recommendations (--no-ai). {len(actionable)} actionable SKUs.")
+        recs = []
     else:
-        print(f"Done. {len(recs)} recommendations received.")
+        print(f"Getting Claude reorder recommendations for {len(actionable)} actionable SKUs...", end=" ", flush=True)
+        recs = get_recommendations(actionable)
+        if recs is None:
+            print("FAILED — proceeding without AI recommendations.")
+        else:
+            print(f"Done. {len(recs)} recommendations received.")
     merge_recommendations(actionable, recs)
 
     # Fill empty Claude fields for non-actionable (HEALTHY) SKUs
@@ -197,7 +202,9 @@ def run_pipeline() -> None:
     enriched_map = {s["sku"]: s for s in enriched}
     warning_skus_enriched = [enriched_map[s["sku"]] for s in warning_skus if s["sku"] in enriched_map]
 
-    if warning_skus_enriched:
+    if no_ai:
+        print("Skipping Claude return analysis (--no-ai).")
+    elif warning_skus_enriched:
         print(f"Getting Claude return analysis for {len(warning_skus_enriched)} warning SKUs...", end=" ", flush=True)
         return_analysis = get_return_analysis(warning_skus_enriched)
         if return_analysis is None:
@@ -228,7 +235,11 @@ def run_pipeline() -> None:
     )
     print(f"Done. {len(size_products)} parent SKUs, {stockout_count} size stockouts.")
 
-    if size_products:
+    if no_ai:
+        print("Skipping Claude size analysis (--no-ai).")
+        from engine.intelligence import merge_size_analysis
+        merge_size_analysis(size_products, None)
+    elif size_products:
         print(f"Getting Claude size analysis for {len(size_products)} parent SKUs...", end=" ", flush=True)
         from engine.intelligence import get_size_analysis, merge_size_analysis
         size_analysis = get_size_analysis(size_products)
@@ -253,7 +264,11 @@ def run_pipeline() -> None:
         f"⚪ Watch: {sum(1 for s in dead_stock_skus if s.get('kill_chain_stage')=='WATCH')})"
     )
 
-    if dead_stock_skus:
+    if no_ai:
+        print("Skipping Claude kill chain analysis (--no-ai).")
+        from engine.intelligence import merge_kill_chain_analysis
+        merge_kill_chain_analysis(dead_stock_skus, None)
+    elif dead_stock_skus:
         # Fast movers = top healthy SKUs by velocity (for bundle pairing suggestions)
         fast_movers = sorted(
             [s for s in enriched if not s.get("kill_chain_stage")],
@@ -365,11 +380,16 @@ def main() -> None:
         action="store_true",
         help="Run the pipeline immediately and exit (no scheduler)",
     )
+    parser.add_argument(
+        "--no-ai",
+        action="store_true",
+        help="Skip all Claude API calls (use formula-based results only). Free to run.",
+    )
     args = parser.parse_args()
 
     if args.now:
         try:
-            run_pipeline()
+            run_pipeline(no_ai=args.no_ai)
         except Exception as exc:
             tb = traceback.format_exc()
             logger.critical("Pipeline crashed: %s\n%s", exc, tb)
@@ -401,10 +421,10 @@ def main() -> None:
         logger.info("Scheduler stopped.")
 
 
-def _safe_run() -> None:
+def _safe_run(no_ai: bool = False) -> None:
     """Wrapper so scheduler continues even if pipeline raises."""
     try:
-        run_pipeline()
+        run_pipeline(no_ai=no_ai)
     except Exception as exc:
         tb = traceback.format_exc()
         logger.critical("Scheduled pipeline crashed: %s\n%s", exc, tb)
