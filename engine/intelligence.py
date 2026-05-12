@@ -474,29 +474,57 @@ def get_kill_chain_analysis(
     fast_movers: list[dict] | None = None,
 ) -> list[dict] | None:
     """
-    Exit strategy recommendations for all dead stock SKUs (score >= 50).
-    fast_movers: top active SKUs passed for bundle pairing suggestions.
-    Returns list of dicts or None on failure.
+    Exit strategy recommendations for dead stock SKUs (score >= 50).
+    Only MARKDOWN/BUNDLE/LIQUIDATE stages are sent — WATCH skipped (no action needed).
+    Batched at _BATCH_SIZE SKUs per call using Haiku to avoid token limits.
+    fast_movers context is included in every batch for bundle pairing.
     """
     if not dead_stock_skus:
         return []
 
+    # Skip WATCH — they need monitoring, not Claude exit strategy
+    actionable = [s for s in dead_stock_skus if s.get("kill_chain_stage") != "WATCH"]
+    if not actionable:
+        logger.info("Kill chain: all SKUs are WATCH stage — skipping Claude analysis.")
+        return []
+
     fast_movers = fast_movers or []
-    fast_mover_payload = [
+    fast_mover_payload = json.dumps([
         {
             "sku": s["sku"],
             "product_name": s.get("product_name", ""),
             "net_velocity_14d": s.get("net_velocity_14d", 0.0),
         }
         for s in sorted(fast_movers, key=lambda x: x.get("net_velocity_14d", 0), reverse=True)[:8]
-    ]
+    ], indent=2)
 
-    payload = _prepare_kill_chain_payload(dead_stock_skus)
-    user_msg = _KILL_CHAIN_PROMPT.format(
-        dead_stock_json=json.dumps(payload, indent=2),
-        fast_movers_json=json.dumps(fast_mover_payload, indent=2),
-    )
-    return _call_claude(_KILL_CHAIN_SYSTEM, user_msg, "kill-chain")
+    payload = _prepare_kill_chain_payload(actionable)
+    batches = [payload[i:i + _BATCH_SIZE] for i in range(0, len(payload), _BATCH_SIZE)]
+    total_batches = len(batches)
+
+    all_results: list[dict] = []
+    any_success = False
+
+    for idx, batch in enumerate(batches, start=1):
+        logger.info(
+            "Claude kill chain: batch %d/%d (%d SKUs)...", idx, total_batches, len(batch)
+        )
+        user_msg = _KILL_CHAIN_PROMPT.format(
+            dead_stock_json=json.dumps(batch, indent=2),
+            fast_movers_json=fast_mover_payload,
+        )
+        result = _call_claude(_KILL_CHAIN_SYSTEM, user_msg, f"kill-chain-batch-{idx}", model=config.CLAUDE_BULK_MODEL)
+        if result:
+            all_results.extend(result)
+            any_success = True
+        else:
+            logger.warning("Kill chain batch %d/%d failed — skipping.", idx, total_batches)
+
+        if idx < total_batches:
+            logger.info("Waiting %ds before next kill chain batch...", _BATCH_DELAY_SECONDS)
+            time.sleep(_BATCH_DELAY_SECONDS)
+
+    return all_results if any_success else None
 
 
 def merge_kill_chain_analysis(
