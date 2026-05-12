@@ -113,11 +113,11 @@ NUPORT_ACTIVE_STATUSES = ["pending", "on-hold", "in-transit", "delivered"]
 NUPORT_PREORDER_STATUS = "on-hold"
 
 # ── Cancellation & return rate buffer ─────────────────────────────────────────
-# ~25-30% of Nuport shipments end up flagged or cancelled → midpoint 27.5%
-# ~15% of delivered orders are returned (Nuport flagged = return)
+# ~15% of orders cancel before delivery (Nuport: cancelled = no-answer / rejected)
+# ~15% of delivered orders are returned (Nuport: flagged = return)
 # These rates adjust raw velocity down to true net consumption velocity,
 # preventing over-ordering based on ghost demand that never converts.
-CANCEL_RATE = 0.275   # orders that cancel before delivery
+CANCEL_RATE = 0.150   # orders that cancel before delivery
 RETURN_RATE = 0.150   # delivered orders that come back as returns
 # Net fulfillment multiplier: only this fraction of placed orders consume stock
-NET_FULFILLMENT_RATE = (1 - CANCEL_RATE) * (1 - RETURN_RATE)  # ≈ 0.726
+NET_FULFILLMENT_RATE = (1 - CANCEL_RATE) * (1 - RETURN_RATE)  # ≈ 0.7225
