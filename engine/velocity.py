@@ -1,12 +1,25 @@
 """
-Velocity calculations and urgency tiering.
+Velocity calculations, cancel/return rate buffering, and urgency tiering.
 
-Given the merged SKU list (with raw order-date arrays from WooCommerce),
-computes:
-  - daily_velocity_14d:  average daily units sold over last 14 days
-  - daily_velocity_7d:   average daily units sold over last 7 days
-  - days_remaining:      current_stock / daily_velocity_14d
-  - urgency_tier:        CRITICAL / WARNING / HEALTHY
+Raw velocity from WooCommerce includes orders that will eventually cancel or be
+returned, which would overstate consumption and cause over-ordering.
+
+Buffer logic (based on Winterfell's historical rates):
+  - ~27.5% of orders cancel before delivery (Nuport: flagged/cancelled)
+  - ~15.0% of delivered orders are returned (Nuport: flagged = return)
+  - Net fulfillment rate ≈ 72.6% of placed orders actually consume stock
+
+We compute two velocity figures per SKU:
+  - raw_velocity_14d / raw_velocity_7d:    straight order volume ÷ days
+  - net_velocity_14d / net_velocity_7d:    raw × NET_FULFILLMENT_RATE
+
+days_remaining and urgency tier use net_velocity so we don't trigger
+false alarms from ghost demand.  The reorder formula also uses net_velocity
+to avoid over-ordering.
+
+Pre-orders (preorder_qty from Nuport on-hold) reduce effective stock
+for days_remaining purposes: a pre-order is committed demand that will
+draw down stock as soon as it dispatches.
 """
 
 from datetime import datetime, timedelta, timezone
@@ -21,44 +34,15 @@ _URGENCY_HEALTHY = "HEALTHY"
 _VERY_HIGH_DAYS = 9999  # sentinel when velocity is zero
 
 
-def _count_units_in_window(order_dates: list[datetime], quantities_per_date: list[int], days: int) -> int:
-    """Sum quantities for orders placed within the last `days` days."""
-    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
-    total = 0
-    for date, qty in zip(order_dates, quantities_per_date):
-        if date is not None and date >= cutoff:
-            total += qty
-    return total
-
-
-def _build_date_qty_pairs(sku_orders: list[dict]) -> tuple[list[datetime], list[int]]:
-    """Extract parallel lists of (order_date, quantity) from wc_order_dates + total_ordered.
-
-    The merged dict stores order_dates as a flat list and total_ordered as aggregate,
-    so we need the raw line-item level data to rebuild per-date quantities.
-    The merger stores `wc_order_dates` as a list of datetimes — one per order line item.
-    Each entry in wc_order_dates corresponds to exactly one unit of quantity_ordered
-    from the original line items.  We rebuilt it that way in woocommerce.py already
-    (we appended order_date for each line item, not each unit).
-
-    To handle this properly, the merger passes all order_dates; here we treat each
-    occurrence as one order event contributing its quantity.  Since wc_order_dates
-    is a flat list where each element is from one line item, and we also have
-    total_ordered, we distribute the total evenly across dates for approximation.
-    In practice it's close enough for velocity calculations.
-    """
-    dates = sku_orders
-    return dates
-
-
 def compute_velocity(merged_skus: list[dict]) -> list[dict]:
     """
     Enrich each SKU dict with velocity metrics and urgency tier.
 
     Input:  list of merged SKU dicts (from data/merger.py)
     Output: same list, each dict augmented with:
-              daily_velocity_14d, daily_velocity_7d,
-              days_remaining, urgency_tier
+              raw_velocity_14d, raw_velocity_7d,
+              net_velocity_14d, net_velocity_7d,
+              effective_stock, days_remaining, urgency_tier
     """
     now_utc = datetime.now(timezone.utc)
     cutoff_14d = now_utc - timedelta(days=config.VELOCITY_LONG_DAYS)
@@ -67,34 +51,39 @@ def compute_velocity(merged_skus: list[dict]) -> list[dict]:
     enriched: list[dict] = []
 
     for sku_data in merged_skus:
-        sku = sku_data["sku"]
         order_dates: list[datetime] = sku_data.get("wc_order_dates", [])
         total_ordered: int = sku_data.get("total_ordered", 0)
         current_stock: int = sku_data.get("current_stock", 0)
+        preorder_qty: int = sku_data.get("preorder_qty", 0)
 
-        # Count orders (line items) within each window
+        # Count order line items within each velocity window
         count_14d = sum(1 for d in order_dates if d is not None and d >= cutoff_14d)
         count_7d = sum(1 for d in order_dates if d is not None and d >= cutoff_7d)
 
-        # Each line item in wc_order_dates represents one order line.
-        # To get units, we scale by avg qty per order line.
-        if order_dates:
-            avg_qty_per_line = total_ordered / len(order_dates)
-        else:
-            avg_qty_per_line = 0.0
-
+        # Scale line-item counts to units using average qty per line item
+        avg_qty_per_line = (total_ordered / len(order_dates)) if order_dates else 0.0
         units_14d = count_14d * avg_qty_per_line
         units_7d = count_7d * avg_qty_per_line
 
-        daily_velocity_14d = round(units_14d / config.VELOCITY_LONG_DAYS, 4)
-        daily_velocity_7d = round(units_7d / config.VELOCITY_SHORT_DAYS, 4)
+        # Raw velocity (includes orders that will cancel/return — not used for decisions)
+        raw_velocity_14d = round(units_14d / config.VELOCITY_LONG_DAYS, 4)
+        raw_velocity_7d = round(units_7d / config.VELOCITY_SHORT_DAYS, 4)
 
-        if daily_velocity_14d > 0:
-            days_remaining = round(current_stock / daily_velocity_14d, 1)
+        # Net velocity = only the portion of orders that actually consume stock
+        # NET_FULFILLMENT_RATE = (1 - CANCEL_RATE) × (1 - RETURN_RATE) ≈ 0.726
+        net_velocity_14d = round(raw_velocity_14d * config.NET_FULFILLMENT_RATE, 4)
+        net_velocity_7d = round(raw_velocity_7d * config.NET_FULFILLMENT_RATE, 4)
+
+        # Effective stock = warehouse stock minus pre-orders already committed
+        # Pre-orders are real demand that will draw down stock when dispatched
+        effective_stock = max(current_stock - preorder_qty, 0)
+
+        if net_velocity_14d > 0:
+            days_remaining = round(effective_stock / net_velocity_14d, 1)
         else:
             days_remaining = _VERY_HIGH_DAYS
 
-        # Urgency tier
+        # Urgency tier based on net velocity and effective (post-preorder) stock
         if days_remaining <= config.URGENCY_CRITICAL_THRESHOLD:
             urgency_tier = _URGENCY_CRITICAL
         elif days_remaining <= config.URGENCY_WARNING_THRESHOLD:
@@ -105,8 +94,15 @@ def compute_velocity(merged_skus: list[dict]) -> list[dict]:
         enriched.append(
             {
                 **sku_data,
-                "daily_velocity_14d": daily_velocity_14d,
-                "daily_velocity_7d": daily_velocity_7d,
+                "raw_velocity_14d": raw_velocity_14d,
+                "raw_velocity_7d": raw_velocity_7d,
+                "net_velocity_14d": net_velocity_14d,
+                "net_velocity_7d": net_velocity_7d,
+                # Keep daily_velocity_14d / 7d aliases pointing to net values
+                # so downstream code (reorder.py, sheets.py) works unchanged
+                "daily_velocity_14d": net_velocity_14d,
+                "daily_velocity_7d": net_velocity_7d,
+                "effective_stock": effective_stock,
                 "days_remaining": days_remaining,
                 "urgency_tier": urgency_tier,
             }
@@ -117,8 +113,12 @@ def compute_velocity(merged_skus: list[dict]) -> list[dict]:
     healthy = sum(1 for s in enriched if s["urgency_tier"] == _URGENCY_HEALTHY)
 
     logger.info(
-        "Velocity computed for %d SKUs — 🔴 Critical: %d | 🟡 Warning: %d | 🟢 Healthy: %d",
+        "Velocity computed for %d SKUs — 🔴 Critical: %d | 🟡 Warning: %d | 🟢 Healthy: %d "
+        "(cancel buffer: %.0f%% | return buffer: %.0f%% | net fulfillment: %.1f%%)",
         len(enriched), critical, warning, healthy,
+        config.CANCEL_RATE * 100,
+        config.RETURN_RATE * 100,
+        config.NET_FULFILLMENT_RATE * 100,
     )
     return enriched
 

@@ -1,6 +1,12 @@
 """
 Pull orders from WooCommerce REST API for the last LOOKBACK_DAYS days.
 
+Statuses pulled: pending, processing, on-hold, completed
+Statuses ignored: cancelled, refunded
+  — cancelled/refunded are excluded because Nuport inaccurately reflects WC status
+    and those orders represent true demand that was placed (even if unfulfilled).
+  — on-hold is critical: Winterfell uses it for pre-orders.
+
 Returns a list of dicts:
   {sku, product_name, quantity_ordered, order_date, order_status}
 """
@@ -68,16 +74,21 @@ def _since_date() -> str:
 
 def pull_orders() -> list[dict]:
     """
-    Pull all orders (processing + completed) from the last LOOKBACK_DAYS.
+    Pull all active orders from the last LOOKBACK_DAYS.
+
+    Pulls: pending, processing, on-hold, completed
+    Ignores: cancelled, refunded
+      — Nuport inaccurately changes WC statuses, so we pull broadly
+        and rely on the cancel/return rate buffer in the engine layer.
+      — on-hold captures pre-orders placed by customers.
 
     Returns flat list of line-item-level dicts keyed by SKU.
     """
     logger.info("Pulling WooCommerce data...")
 
-    statuses = ["processing", "completed"]
     raw_orders: list[dict] = []
 
-    for status in statuses:
+    for status in config.WC_ACTIVE_STATUSES:
         orders = _wc_get(
             "orders",
             {
@@ -88,6 +99,7 @@ def pull_orders() -> list[dict]:
             },
         )
         raw_orders.extend(orders)
+        logger.info("  WooCommerce status='%s': %d orders fetched.", status, len(orders))
 
     records: list[dict] = []
 

@@ -39,7 +39,8 @@ def run_pipeline() -> None:
 
     # ── 1. Pull data ──────────────────────────────────────────────────────────
     wc_orders = []
-    nuport_deliveries = []
+    nuport_shipments = []
+    nuport_preorders = {}
     nuport_stock = {}
     zoho_pos = {}
     missing_sources = []
@@ -54,15 +55,17 @@ def run_pipeline() -> None:
         logger.error("WooCommerce pull failed: %s", exc)
         missing_sources.append("WooCommerce")
 
-    print("Pulling Nuport delivery data...", end=" ", flush=True)
+    print("Pulling Nuport shipment data (pending/on-hold/in-transit/delivered)...", end=" ", flush=True)
     try:
-        from data.nuport import pull_deliveries
-        nuport_deliveries = pull_deliveries()
-        print(f"Done. {len({r['sku'] for r in nuport_deliveries})} SKUs found.")
+        from data.nuport import pull_shipments
+        nuport_shipments, nuport_preorders = pull_shipments()
+        sku_count = len({r["sku"] for r in nuport_shipments})
+        preorder_count = len(nuport_preorders)
+        print(f"Done. {sku_count} SKUs in shipments, {preorder_count} SKUs with pre-orders.")
     except Exception as exc:
         print("FAILED.")
-        logger.error("Nuport deliveries pull failed: %s", exc)
-        missing_sources.append("Nuport (deliveries)")
+        logger.error("Nuport shipments pull failed: %s", exc)
+        missing_sources.append("Nuport (shipments)")
 
     print("Pulling Nuport stock levels...", end=" ", flush=True)
     try:
@@ -93,7 +96,7 @@ def run_pipeline() -> None:
     # ── 2. Merge ──────────────────────────────────────────────────────────────
     print("Merging data sources...", end=" ", flush=True)
     from data.merger import merge
-    merged = merge(wc_orders, nuport_deliveries, nuport_stock, zoho_pos)
+    merged = merge(wc_orders, nuport_shipments, nuport_preorders, nuport_stock, zoho_pos)
     print(f"Done. {len(merged)} unique SKUs.")
 
     if not merged:

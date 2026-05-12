@@ -26,6 +26,11 @@ _SYSTEM_PROMPT = (
     "recommendations. Be direct, specific, and commercially aggressive. "
     "Never recommend underordering a trending product. "
     "All currency values are in BDT (Bangladeshi Taka). "
+    "Velocity figures provided are already adjusted for a 27.5% cancellation rate "
+    "and 15% return rate — they represent net consumption, not raw order volume. "
+    "pre_order_qty is committed demand already sitting in Nuport on-hold status "
+    "(pre-orders placed by customers); factor this in — if preorder_qty is high "
+    "relative to stock, urgency is higher than days_remaining suggests. "
     "Respond with a valid JSON array only — no prose, no markdown fences."
 )
 
@@ -33,12 +38,19 @@ _USER_PROMPT_TEMPLATE = """Analyze the following SKUs that need reorder attentio
 For each SKU, output a JSON object with these exact keys:
   - sku: the SKU string
   - trend: "ACCELERATING" | "DECELERATING" | "STABLE"
-  - trend_note: one sentence comparing 7-day vs 14-day velocity
-  - recommended_reorder_qty: integer (your recommended order quantity, may differ from formula if you see strong trend signals)
-  - reasoning: one to two sentences explaining why
-  - risk_flag: string — note if Meta Ads spend is high (use "HIGH_ADS_SPEND" if meta_ads_high=true, else "NONE")
-  - supplier_note: one sentence — if multiple suppliers exist mention preference, else "N/A"
+  - trend_note: one sentence comparing net 7-day vs 14-day velocity
+  - recommended_reorder_qty: integer (your recommendation — be aggressive if accelerating or preorder_qty is high)
+  - reasoning: one to two sentences explaining why, mentioning pre-orders if significant
+  - risk_flag: "HIGH_ADS_SPEND" if meta_ads_high=true | "HIGH_PREORDER_PRESSURE" if preorder_qty > effective_stock | "NONE" otherwise
+  - supplier_note: one sentence — if supplier is known mention lead time consideration, else "N/A"
   - action_note: one concise action line for the ops team (max 15 words)
+
+Context on the data:
+  - net_velocity_14d / net_velocity_7d: already adjusted for ~27.5% cancel + 15% return
+  - raw_velocity_14d: total order volume before adjustment (for reference only)
+  - preorder_qty: Nuport on-hold — pre-orders that will draw down stock when dispatched
+  - effective_stock: current_stock minus preorder_qty (true available stock)
+  - days_remaining: effective_stock ÷ net_velocity_14d
 
 Input data (JSON):
 {sku_json}
@@ -55,8 +67,11 @@ def _prepare_payload(skus: list[dict]) -> list[dict[str, Any]]:
                 "sku": s["sku"],
                 "product_name": s.get("product_name", ""),
                 "current_stock": s.get("current_stock", 0),
-                "daily_velocity_14d": s.get("daily_velocity_14d", 0.0),
-                "daily_velocity_7d": s.get("daily_velocity_7d", 0.0),
+                "preorder_qty": s.get("preorder_qty", 0),
+                "effective_stock": s.get("effective_stock", s.get("current_stock", 0)),
+                "raw_velocity_14d": s.get("raw_velocity_14d", 0.0),
+                "net_velocity_14d": s.get("net_velocity_14d", 0.0),
+                "net_velocity_7d": s.get("net_velocity_7d", 0.0),
                 "days_remaining": s.get("days_remaining", 9999),
                 "true_demand": s.get("true_demand", 0),
                 "last_purchase_price_bdt": s.get("last_purchase_price", 0.0),

@@ -102,3 +102,22 @@ URGENCY_WARNING_THRESHOLD = 20   # days remaining <= this → WARNING
 
 MAX_API_RETRIES = 3
 RETRY_BACKOFF_BASE = 2        # seconds; actual delay = base ** attempt
+
+# ── Order status filters ───────────────────────────────────────────────────────
+# WooCommerce: pull these 4, ignore cancelled + refunded
+WC_ACTIVE_STATUSES = ["pending", "processing", "on-hold", "completed"]
+
+# Nuport: pull these 4, ignore flagged (returns) + cancelled (no-answer/rejected)
+NUPORT_ACTIVE_STATUSES = ["pending", "on-hold", "in-transit", "delivered"]
+# on-hold in Nuport = pre-orders; tracked separately for demand forecasting
+NUPORT_PREORDER_STATUS = "on-hold"
+
+# ── Cancellation & return rate buffer ─────────────────────────────────────────
+# ~25-30% of Nuport shipments end up flagged or cancelled → midpoint 27.5%
+# ~15% of delivered orders are returned (Nuport flagged = return)
+# These rates adjust raw velocity down to true net consumption velocity,
+# preventing over-ordering based on ghost demand that never converts.
+CANCEL_RATE = 0.275   # orders that cancel before delivery
+RETURN_RATE = 0.150   # delivered orders that come back as returns
+# Net fulfillment multiplier: only this fraction of placed orders consume stock
+NET_FULFILLMENT_RATE = (1 - CANCEL_RATE) * (1 - RETURN_RATE)  # ≈ 0.726

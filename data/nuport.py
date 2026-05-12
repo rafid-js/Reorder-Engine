@@ -3,13 +3,25 @@ Pull shipment/delivery data and current stock levels from Nuport API.
 
 Nuport is the OMS/logistics layer for Winterfell.
 
-Returns two things:
-  - deliveries: list of {sku, quantity_delivered, delivery_status, delivery_date}
-  - stock:      dict of {sku -> current_stock_on_hand}
+Statuses pulled: pending, on-hold, in-transit, delivered
+Statuses ignored: flagged (returns), cancelled (no-answer / customer rejected)
+  — flagged = return; cancelled = customer didn't receive call or cancelled.
+    Both are excluded from demand calculation. The cancel/return rates are
+    applied as a buffer multiplier in engine/velocity.py instead.
+  — on-hold = PRE-ORDERS. Tracked separately as `preorder_qty` per SKU.
+    This is critical for Winterfell to understand committed demand before
+    the product is even in stock.
+
+Returns three things:
+  - shipments:    list of {sku, quantity, shipment_status, shipment_date}
+                  (all active statuses except flagged/cancelled)
+  - preorders:    dict of {sku -> preorder_qty}  (on-hold shipments only)
+  - stock:        dict of {sku -> current_stock_on_hand}
 """
 
 import time
 from datetime import datetime, timedelta, timezone
+from collections import defaultdict
 from typing import Any
 
 import requests
@@ -24,7 +36,7 @@ _HEADERS = {
 }
 
 
-def _nuport_get(path: str, params: dict[str, Any] | None = None) -> Any:
+def _nuport_get(path: str, params: dict[str, Any] | None = None) -> list[dict]:
     """GET from Nuport API with retry + pagination support."""
     url = f"{config.NUPORT_BASE_URL}/{path.lstrip('/')}"
     params = params or {}
@@ -69,7 +81,6 @@ def _nuport_get(path: str, params: dict[str, Any] | None = None) -> Any:
 
         results.extend(batch)
 
-        # If fewer records than limit were returned, we've reached the end
         if len(batch) < params["limit"]:
             break
 
@@ -83,68 +94,91 @@ def _since_date() -> str:
     return cutoff.strftime("%Y-%m-%d")
 
 
-def pull_deliveries() -> list[dict]:
-    """
-    Pull all shipment/delivery records for the last LOOKBACK_DAYS.
+def _extract_items(shipment: dict) -> list[dict]:
+    """Extract line items from a shipment, trying common key names."""
+    return (
+        shipment.get("items")
+        or shipment.get("line_items")
+        or shipment.get("products")
+        or []
+    )
 
-    Returns flat list of line-item-level dicts keyed by SKU.
-    """
-    logger.info("Pulling Nuport delivery data...")
 
+def _parse_date(shipment: dict) -> datetime | None:
+    date_str = (
+        shipment.get("delivered_at")
+        or shipment.get("delivery_date")
+        or shipment.get("updated_at")
+        or shipment.get("created_at")
+        or ""
+    )
     try:
-        shipments = _nuport_get(
-            "shipments",
-            {"from_date": _since_date(), "status": "delivered"},
-        )
-    except RuntimeError as exc:
-        logger.error("Failed to pull Nuport deliveries: %s", exc)
-        return []
+        return datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+    except (ValueError, AttributeError):
+        return None
+
+
+def pull_shipments() -> tuple[list[dict], dict[str, int]]:
+    """
+    Pull all active shipments for the last LOOKBACK_DAYS.
+
+    Pulls: pending, on-hold, in-transit, delivered
+    Ignores: flagged (returns), cancelled
+
+    Returns:
+      - records:   flat list of {sku, quantity, shipment_status, shipment_date}
+      - preorders: dict of {sku -> qty} for on-hold shipments only
+    """
+    logger.info("Pulling Nuport shipment data...")
+
+    all_shipments: list[dict] = []
+
+    for status in config.NUPORT_ACTIVE_STATUSES:
+        try:
+            batch = _nuport_get(
+                "shipments",
+                {"from_date": _since_date(), "status": status},
+            )
+            all_shipments.extend(batch)
+            logger.info("  Nuport status='%s': %d shipments fetched.", status, len(batch))
+        except RuntimeError as exc:
+            logger.error("Failed to pull Nuport status='%s': %s", status, exc)
 
     records: list[dict] = []
+    preorders: dict[str, int] = defaultdict(int)
 
-    for shipment in shipments:
-        delivery_date_str = (
-            shipment.get("delivered_at")
-            or shipment.get("delivery_date")
-            or shipment.get("updated_at")
-            or ""
-        )
-        try:
-            delivery_date = datetime.fromisoformat(delivery_date_str.replace("Z", "+00:00"))
-        except (ValueError, AttributeError):
-            delivery_date = None
+    for shipment in all_shipments:
+        status = shipment.get("status", "")
+        shipment_date = _parse_date(shipment)
+        is_preorder = (status.lower() == config.NUPORT_PREORDER_STATUS)
 
-        delivery_status = shipment.get("status", "delivered")
-
-        # Line items may be under "items", "line_items", or "products"
-        items = (
-            shipment.get("items")
-            or shipment.get("line_items")
-            or shipment.get("products")
-            or []
-        )
-
-        for item in items:
+        for item in _extract_items(shipment):
             sku = (item.get("sku") or "").strip().upper()
             if not sku:
                 continue
 
-            records.append(
-                {
-                    "sku": sku,
-                    "quantity_delivered": int(item.get("quantity", 0)),
-                    "delivery_status": delivery_status,
-                    "delivery_date": delivery_date,
-                }
-            )
+            qty = int(item.get("quantity", 0))
+
+            if is_preorder:
+                # Pre-orders tracked separately — committed demand, not yet delivered
+                preorders[sku] += qty
+            else:
+                records.append(
+                    {
+                        "sku": sku,
+                        "quantity": qty,
+                        "shipment_status": status,
+                        "shipment_date": shipment_date,
+                    }
+                )
 
     sku_count = len({r["sku"] for r in records})
     logger.info(
-        "Nuport delivery data pulled. %d SKUs found across %d delivery records.",
-        sku_count,
-        len(records),
+        "Nuport shipment data pulled. %d SKUs across %d records. "
+        "%d SKUs have pre-order (on-hold) qty.",
+        sku_count, len(records), len(preorders),
     )
-    return records
+    return records, dict(preorders)
 
 
 def pull_stock() -> dict[str, int]:
