@@ -368,3 +368,118 @@ def merge_size_analysis(size_products: list[dict], analysis: list[dict] | None) 
         for s in parent["sizes"]:
             s["claude_size_note"] = size_notes.get(s["size"], "")
     return size_products
+
+
+# ── Kill Chain exit strategy ──────────────────────────────────────────────────
+
+_KILL_CHAIN_SYSTEM = (
+    "You are Winterfell's inventory exit strategist for a premium Gen Z fast fashion brand "
+    "in Bangladesh. For each dead stock SKU, recommend the fastest way to recover capital "
+    "without destroying brand equity. Consider: markdown depth, bundle pairing with fast movers, "
+    "clearance timing relative to upcoming drops, and whether the product can be reworked or "
+    "repurposed. Winterfell is a premium Gen Z fast fashion brand — protect brand perception "
+    "while clearing dead stock aggressively. "
+    "Respond with a valid JSON array only — no prose, no markdown fences."
+)
+
+_KILL_CHAIN_PROMPT = """Analyze the following dead stock SKUs and recommend exit strategies.
+For each SKU, output a JSON object with these exact keys:
+  - sku: the SKU string
+  - confirmed_stage: "WATCH" | "MARKDOWN" | "BUNDLE" | "LIQUIDATE" (confirm or upgrade our computed stage)
+  - exit_action: specific action with timeline (e.g. "Run 25% flash sale for 5 days starting Friday")
+  - brand_risk: "Low" | "Medium" | "High" — risk to brand perception from this action
+  - ops_instruction: one-line instruction for ops team (max 20 words)
+  - bundle_with: SKU of the best fast mover to pair with (only for BUNDLE stage, else empty string)
+
+Data context:
+  - dead_stock_score: 50–100 composite signal (higher = worse)
+  - kill_chain_stage: our computed stage (you may upgrade but not downgrade)
+  - days_since_last_sale: days since any unit of this SKU sold
+  - sell_through_30d_pct: % of available inventory sold in last 30 days
+  - stock_age_days: days since first unit entered the system
+  - capital_locked: BDT value of stuck inventory
+  - estimated_recovery: BDT at recommended exit path
+  - fast_movers: top currently selling SKUs available for bundle pairing
+
+Dead stock SKUs (JSON):
+{dead_stock_json}
+
+Fast movers available for bundle pairing:
+{fast_movers_json}
+
+Return ONLY a JSON array. No extra text."""
+
+
+def _prepare_kill_chain_payload(dead_stock_skus: list[dict]) -> list[dict[str, Any]]:
+    payload = []
+    for s in dead_stock_skus:
+        payload.append({
+            "sku": s["sku"],
+            "product_name": s.get("product_name", ""),
+            "dead_stock_score": s.get("dead_stock_score", 0),
+            "kill_chain_stage": s.get("kill_chain_stage", ""),
+            "days_since_last_sale": s.get("days_since_last_sale", 0),
+            "sell_through_30d_pct": s.get("sell_through_30d_pct", 0),
+            "stock_age_days": s.get("stock_age_days", 0),
+            "current_stock": s.get("current_stock", 0),
+            "capital_locked_bdt": s.get("capital_locked", 0),
+            "estimated_recovery_bdt": s.get("estimated_recovery", 0),
+            "suggested_discount_pct": s.get("suggested_discount_pct", 0),
+            "supplier_name": s.get("supplier_name", ""),
+        })
+    return payload
+
+
+def get_kill_chain_analysis(
+    dead_stock_skus: list[dict],
+    fast_movers: list[dict] | None = None,
+) -> list[dict] | None:
+    """
+    Exit strategy recommendations for all dead stock SKUs (score >= 50).
+    fast_movers: top active SKUs passed for bundle pairing suggestions.
+    Returns list of dicts or None on failure.
+    """
+    if not dead_stock_skus:
+        return []
+
+    fast_movers = fast_movers or []
+    fast_mover_payload = [
+        {
+            "sku": s["sku"],
+            "product_name": s.get("product_name", ""),
+            "net_velocity_14d": s.get("net_velocity_14d", 0.0),
+        }
+        for s in sorted(fast_movers, key=lambda x: x.get("net_velocity_14d", 0), reverse=True)[:8]
+    ]
+
+    payload = _prepare_kill_chain_payload(dead_stock_skus)
+    user_msg = _KILL_CHAIN_PROMPT.format(
+        dead_stock_json=json.dumps(payload, indent=2),
+        fast_movers_json=json.dumps(fast_mover_payload, indent=2),
+    )
+    return _call_claude(_KILL_CHAIN_SYSTEM, user_msg, "kill-chain")
+
+
+def merge_kill_chain_analysis(
+    dead_stock_skus: list[dict],
+    analysis: list[dict] | None,
+) -> list[dict]:
+    """Attach Claude kill chain analysis to each dead stock SKU dict."""
+    if not analysis:
+        for s in dead_stock_skus:
+            s.setdefault("claude_kill_chain_stage", s.get("kill_chain_stage", ""))
+            s.setdefault("claude_exit_action", "Manual review required.")
+            s.setdefault("claude_brand_risk", "Unknown")
+            s.setdefault("claude_ops_instruction", "")
+            s.setdefault("claude_bundle_with", "")
+        return dead_stock_skus
+
+    analysis_map = {r["sku"]: r for r in analysis}
+    for s in dead_stock_skus:
+        rec = analysis_map.get(s["sku"], {})
+        s["claude_kill_chain_stage"] = rec.get("confirmed_stage", s.get("kill_chain_stage", ""))
+        s["claude_exit_action"]      = rec.get("exit_action", "")
+        s["claude_brand_risk"]       = rec.get("brand_risk", "Unknown")
+        s["claude_ops_instruction"]  = rec.get("ops_instruction", "")
+        s["claude_bundle_with"]      = rec.get("bundle_with", "")
+    return dead_stock_skus

@@ -144,3 +144,4 @@ SIZE_SLOW_MOVER_SELL_THROUGH = 0.20  # <20% sell-through in 14d → 🧊 Slow Mo
 SIZE_OVERSTOCK_DAYS = 60             # stock > 60d of velocity → ⚠️ Overstock Risk
 
 SHEETS_SIZE_TAB_NAME = "Size Intelligence"
+SHEETS_KILL_CHAIN_TAB_NAME = "Kill Chain"

@@ -31,10 +31,10 @@ def run_pipeline() -> None:
       6.  Get Claude reorder recommendations (CRITICAL/WARNING SKUs)
       7.  Get Claude return analysis (early warning SKUs)
       8.  Compute size ratios + get Claude size analysis
-      9.  (reserved)
-      10. Write to Google Sheets (Reorder Queue + Size Intelligence)
-      11. Send Gmail briefing (with return warnings + size section)
-      12. Send WhatsApp alert (with size stockout block)
+      9.  Score dead stock (Kill Chain) + get Claude exit strategy
+      10. Write to Google Sheets (Reorder Queue + Size Intelligence + Kill Chain)
+      11. Send Gmail briefing (with return warnings + size section + kill chain report)
+      12. Send WhatsApp alert (with size stockout + kill chain blocks)
     """
     start_time = datetime.now(_BST)
     logger.info("=" * 60)
@@ -230,6 +230,44 @@ def run_pipeline() -> None:
     else:
         print("No multi-size parent SKUs found — skipping size analysis.")
 
+    # ── 9. Dead Stock Kill Chain scoring + Claude exit strategy ───────────────
+    print("Scoring dead stock (Kill Chain)...", end=" ", flush=True)
+    from engine.dead_stock import compute_dead_stock
+    dead_stock_skus = compute_dead_stock(enriched)
+    kc_blocked = sum(1 for s in dead_stock_skus if s.get("kill_chain_blocked"))
+    print(
+        f"Done. {len(dead_stock_skus)} flagged "
+        f"(🔴 Liquidate: {sum(1 for s in dead_stock_skus if s.get('kill_chain_stage')=='LIQUIDATE')} | "
+        f"🟠 Bundle: {sum(1 for s in dead_stock_skus if s.get('kill_chain_stage')=='BUNDLE')} | "
+        f"🟡 Markdown: {sum(1 for s in dead_stock_skus if s.get('kill_chain_stage')=='MARKDOWN')} | "
+        f"⚪ Watch: {sum(1 for s in dead_stock_skus if s.get('kill_chain_stage')=='WATCH')})"
+    )
+
+    if dead_stock_skus:
+        # Fast movers = top healthy SKUs by velocity (for bundle pairing suggestions)
+        fast_movers = sorted(
+            [s for s in enriched if not s.get("kill_chain_stage")],
+            key=lambda s: s.get("net_velocity_14d", 0),
+            reverse=True,
+        )[:10]
+
+        print(f"Getting Claude kill chain analysis for {len(dead_stock_skus)} SKUs...", end=" ", flush=True)
+        from engine.intelligence import get_kill_chain_analysis, merge_kill_chain_analysis
+        kc_analysis = get_kill_chain_analysis(dead_stock_skus, fast_movers)
+        if kc_analysis is None:
+            print("FAILED — proceeding without kill chain analysis.")
+        else:
+            print(f"Done. {len(kc_analysis)} recommendations received.")
+        merge_kill_chain_analysis(dead_stock_skus, kc_analysis)
+    else:
+        print("No dead stock detected — skipping kill chain analysis.")
+
+    # Ensure all non-dead-stock enriched SKUs have default dead stock fields
+    from engine.dead_stock import _stamp_defaults
+    for s in enriched:
+        if not s.get("kill_chain_stage") and "dead_stock_score" not in s:
+            _stamp_defaults(s)
+
     # ── 10. Google Sheets ─────────────────────────────────────────────────────
     print("Writing to Google Sheets (Reorder Queue)...", end=" ", flush=True)
     try:
@@ -250,11 +288,20 @@ def run_pipeline() -> None:
             print("FAILED.")
             logger.error("Size Intelligence sheet write failed (non-fatal): %s", exc)
 
+    print("Writing to Google Sheets (Kill Chain)...", end=" ", flush=True)
+    try:
+        from outputs.kill_chain_sheet import write_kill_chain_sheet
+        write_kill_chain_sheet(dead_stock_skus)
+        print("Done.")
+    except Exception as exc:
+        print("FAILED.")
+        logger.error("Kill Chain sheet write failed (non-fatal): %s", exc)
+
     # ── 11. Email briefing ────────────────────────────────────────────────────
     print("Sending email briefing...", end=" ", flush=True)
     try:
         from outputs.email import send_email
-        send_email(enriched, warning_skus_final, size_products)
+        send_email(enriched, warning_skus_final, size_products, dead_stock_skus)
         print("Done.")
     except Exception as exc:
         print("FAILED.")
@@ -264,7 +311,7 @@ def run_pipeline() -> None:
     print("Sending WhatsApp alert...", end=" ", flush=True)
     try:
         from outputs.whatsapp import send_whatsapp_alert
-        send_whatsapp_alert(enriched, warning_skus_final, size_products)
+        send_whatsapp_alert(enriched, warning_skus_final, size_products, dead_stock_skus)
         print("Done.")
     except Exception as exc:
         print("FAILED.")
@@ -275,7 +322,8 @@ def run_pipeline() -> None:
         "Reorder Engine run complete in %.1fs. "
         "Critical: %d | Warning: %d | Healthy: %d | "
         "Return warnings: %d | Hold flags: %d | "
-        "Size parents: %d | Size stockouts: %d",
+        "Size parents: %d | Size stockouts: %d | "
+        "Dead stock: %d (blocked from reorder: %d)",
         elapsed,
         sum(1 for s in enriched if s.get("urgency_tier") == "CRITICAL"),
         sum(1 for s in enriched if s.get("urgency_tier") == "WARNING"),
@@ -284,6 +332,8 @@ def run_pipeline() -> None:
         sum(1 for s in enriched if s.get("hold_for_review")),
         len(size_products),
         sum(1 for p in size_products for s in p["sizes"] if s["health_flag"] == "💀 SIZE_STOCKOUT"),
+        len(dead_stock_skus),
+        kc_blocked,
     )
     logger.info("=" * 60)
 

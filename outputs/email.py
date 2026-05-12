@@ -260,8 +260,99 @@ def _build_size_section(size_products: list[dict]) -> str:
     </div>"""
 
 
+def _build_kill_chain_section(dead_stock_skus: list[dict]) -> str:
+    """HTML section for 💀 Kill Chain Report. Only shown if Stage 2+ SKUs exist."""
+    from engine.dead_stock import LIQUIDATE, BUNDLE, MARKDOWN
+
+    actionable = [
+        s for s in dead_stock_skus
+        if s.get("kill_chain_stage") in (LIQUIDATE, BUNDLE, MARKDOWN)
+    ]
+    if not actionable:
+        return ""
+
+    liquidate = [s for s in actionable if s["kill_chain_stage"] == LIQUIDATE]
+    bundle    = [s for s in actionable if s["kill_chain_stage"] == BUNDLE]
+    markdown  = [s for s in actionable if s["kill_chain_stage"] == MARKDOWN]
+
+    total_locked   = sum(s.get("capital_locked", 0) for s in actionable)
+    total_recovery = sum(s.get("estimated_recovery", 0) for s in actionable)
+
+    def _stage_rows(skus: list[dict], stage_color: str, stage_emoji: str) -> str:
+        rows = []
+        for s in skus:
+            rec = s.get("claude_exit_action") or s.get("claude_ops_instruction") or "—"
+            brand_risk = s.get("claude_brand_risk", "")
+            risk_badge = ""
+            if brand_risk == "High":
+                risk_badge = '<span style="background:#c62828;color:#fff;padding:1px 5px;border-radius:3px;font-size:11px;margin-left:6px;">High Risk</span>'
+            elif brand_risk == "Medium":
+                risk_badge = '<span style="background:#e65100;color:#fff;padding:1px 5px;border-radius:3px;font-size:11px;margin-left:6px;">Med Risk</span>'
+
+            bundle_note = ""
+            if s.get("claude_bundle_with"):
+                bundle_note = f'<br/><span style="font-size:12px;color:#555;">Pair with: <strong>{s["claude_bundle_with"]}</strong></span>'
+
+            discount_note = ""
+            if s.get("kill_chain_stage") == MARKDOWN and s.get("suggested_discount_pct"):
+                discount_note = f'<br/><span style="font-size:12px;color:#555;">Suggested discount: <strong>{s["suggested_discount_pct"]}%</strong> — est. clearance in 14 days</span>'
+
+            rows.append(f"""
+            <tr style="border-bottom:1px solid #f0f0f0;">
+              <td style="padding:8px 10px;font-family:monospace;font-weight:bold;">{s.get('sku','')}</td>
+              <td style="padding:8px 10px;">{s.get('product_name','')}</td>
+              <td style="padding:8px 10px;text-align:center;">{s.get('current_stock',0)} pcs</td>
+              <td style="padding:8px 10px;text-align:right;">BDT {s.get('capital_locked',0):,.0f}</td>
+              <td style="padding:8px 10px;">
+                {rec}{risk_badge}{bundle_note}{discount_note}
+              </td>
+            </tr>""")
+        return "".join(rows)
+
+    def _stage_block(skus: list[dict], title: str, header_bg: str) -> str:
+        if not skus:
+            return ""
+        rows_html = _stage_rows(skus, header_bg, "")
+        return f"""
+        <div style="margin-bottom:20px;">
+          <div style="background:{header_bg};color:#fff;padding:8px 14px;border-radius:4px 4px 0 0;font-weight:bold;font-size:14px;">{title} ({len(skus)} SKUs)</div>
+          <table border="0" cellspacing="0" cellpadding="0"
+                 style="width:100%;border-collapse:collapse;font-size:13px;border:1px solid #ddd;border-top:none;">
+            <thead>
+              <tr style="background:#f5f5f5;">
+                <th style="padding:7px 10px;text-align:left;">SKU</th>
+                <th style="padding:7px 10px;text-align:left;">Product</th>
+                <th style="padding:7px 10px;text-align:center;">Units</th>
+                <th style="padding:7px 10px;text-align:right;">Capital Locked</th>
+                <th style="padding:7px 10px;text-align:left;">Action</th>
+              </tr>
+            </thead>
+            <tbody>{rows_html}</tbody>
+          </table>
+        </div>"""
+
+    liquidate_block = _stage_block(liquidate, "🔴 LIQUIDATE", "#b71c1c")
+    bundle_block    = _stage_block(bundle,    "🟠 BUNDLE",    "#e65100")
+    markdown_block  = _stage_block(markdown,  "🟡 MARKDOWN",  "#f9a825")
+
+    return f"""
+    <div style="margin-top:30px;">
+      <div style="background:#1a1a2e;border-left:4px solid #c62828;padding:14px 20px;margin-bottom:16px;">
+        <h2 style="margin:0;color:#fff;font-size:18px;">💀 Kill Chain Report — {len(actionable)} SKUs Need Exit Action</h2>
+        <p style="margin:6px 0 0;color:#ccc;font-size:13px;">
+          Total capital locked: <strong>BDT {total_locked:,.0f}</strong>
+          &nbsp;|&nbsp; Est. recovery possible: <strong>BDT {total_recovery:,.0f}</strong>
+        </p>
+      </div>
+      {liquidate_block}
+      {bundle_block}
+      {markdown_block}
+    </div>"""
+
+
 def build_email_html(all_skus: list[dict], warning_skus: list[dict], run_date: str,
-                     size_products: list[dict] | None = None) -> str:
+                     size_products: list[dict] | None = None,
+                     dead_stock_skus: list[dict] | None = None) -> str:
     critical = [s for s in all_skus if s.get("urgency_tier") == "CRITICAL"]
     warning = [s for s in all_skus if s.get("urgency_tier") == "WARNING"]
     healthy = [s for s in all_skus if s.get("urgency_tier") == "HEALTHY"]
@@ -274,6 +365,7 @@ def build_email_html(all_skus: list[dict], warning_skus: list[dict], run_date: s
 
     return_warnings_html = _build_return_warnings_section(warning_skus)
     size_section_html = _build_size_section(size_products or [])
+    kill_chain_html = _build_kill_chain_section(dead_stock_skus or [])
 
     return f"""<!DOCTYPE html>
 <html>
@@ -289,6 +381,7 @@ def build_email_html(all_skus: list[dict], warning_skus: list[dict], run_date: s
     &nbsp;&nbsp; 🟡 Warning: <strong>{len(warning)}</strong>
     &nbsp;&nbsp; 🟢 Healthy: <strong>{len(healthy)}</strong>
     &nbsp;&nbsp; ⚠️ Return Warnings: <strong>{len(warning_skus)}</strong>
+    &nbsp;&nbsp; 💀 Kill Chain: <strong>{len([s for s in (dead_stock_skus or []) if s.get("kill_chain_stage") in ("MARKDOWN","BUNDLE","LIQUIDATE")])}</strong>
     &nbsp;&nbsp;&nbsp; | &nbsp;
     Estimated reorder cost (RED+YELLOW): <strong>BDT {total_cost:,.0f}</strong>
   </div>
@@ -306,6 +399,8 @@ def build_email_html(all_skus: list[dict], warning_skus: list[dict], run_date: s
 
     {size_section_html}
 
+    {kill_chain_html}
+
   </div>
 
   <div style="background:#f0f0f0;padding:14px 30px;border-top:1px solid #ddd;
@@ -322,13 +417,16 @@ def send_email(
     all_skus: list[dict],
     warning_skus: list[dict] | None = None,
     size_products: list[dict] | None = None,
+    dead_stock_skus: list[dict] | None = None,
 ) -> None:
     """Build and send the daily reorder briefing email."""
-    warning_skus = warning_skus or []
-    size_products = size_products or []
+    warning_skus    = warning_skus or []
+    size_products   = size_products or []
+    dead_stock_skus = dead_stock_skus or []
+
     critical_count = sum(1 for s in all_skus if s.get("urgency_tier") == "CRITICAL")
-    warning_count = sum(1 for s in all_skus if s.get("urgency_tier") == "WARNING")
-    action_count = critical_count + warning_count
+    warning_count  = sum(1 for s in all_skus if s.get("urgency_tier") == "WARNING")
+    action_count   = critical_count + warning_count
 
     run_date = datetime.now().strftime("%d %b %Y")
 
@@ -341,8 +439,14 @@ def send_email(
         )
         if stockout_count:
             subject += f" + {stockout_count} Size Stockouts"
+    kc_actionable = [
+        s for s in dead_stock_skus
+        if s.get("kill_chain_stage") in ("MARKDOWN", "BUNDLE", "LIQUIDATE")
+    ]
+    if kc_actionable:
+        subject += f" + {len(kc_actionable)} Kill Chain"
 
-    html_body = build_email_html(all_skus, warning_skus, run_date, size_products)
+    html_body = build_email_html(all_skus, warning_skus, run_date, size_products, dead_stock_skus)
 
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject

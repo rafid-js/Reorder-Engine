@@ -109,8 +109,12 @@ def _row_for_sku(sku_data: dict, updated_at: str) -> list:
         ])
     ) or "—"
 
-    # Prepend hold flag to recommendation if blocked
-    if hold:
+    # Kill chain block overrides reorder recommendation
+    kc_stage = sku_data.get("kill_chain_stage")
+    kc_label = sku_data.get("kill_chain_stage_label", "")
+    if sku_data.get("kill_chain_blocked") and kc_stage:
+        recommendation = f"⛔ Blocked — Kill Chain Stage {kc_stage} ({kc_label}) | {recommendation}"
+    elif hold:
         recommendation = "⛔ HOLD — Human Review Required | " + recommendation
 
     days = sku_data.get("days_remaining", 9999)
