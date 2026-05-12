@@ -48,7 +48,7 @@ def _parse_claude_response(text: str) -> list[dict] | None:
         return None
 
 
-_BATCH_SIZE = 40          # SKUs per Claude call (keeps input well under 30k tokens)
+_BATCH_SIZE = 20          # SKUs per Claude call — 20 × ~250 tokens ≈ 5k output, fits in 8192
 _BATCH_DELAY_SECONDS = 65 # wait between batches to respect per-minute rate limit
 
 
@@ -61,7 +61,7 @@ def _call_claude(system: str, user: str, label: str) -> list[dict] | None:
             logger.info("Calling Claude API [%s] attempt %d...", label, attempt)
             message = _client.messages.create(
                 model=config.CLAUDE_MODEL,
-                max_tokens=4096,
+                max_tokens=8192,
                 system=system,
                 messages=[{"role": "user", "content": user}],
             )
