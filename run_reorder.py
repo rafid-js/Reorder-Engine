@@ -30,7 +30,7 @@ def run_pipeline(no_ai: bool = False) -> None:
       5.  Compute reorder quantities
       6.  Get Claude reorder recommendations (CRITICAL/WARNING SKUs)
       7.  Get Claude return analysis (early warning SKUs)
-      8.  Compute size ratios + get Claude size analysis
+      8.  Compute size ratios (SS cutting ratio logic — no Claude)
       9.  Score dead stock (Kill Chain) + get Claude exit strategy
       10. Write to Google Sheets (Reorder Queue + Size Intelligence + Kill Chain)
       11. Send Gmail briefing (with return warnings + size section + kill chain report)
@@ -233,25 +233,9 @@ def run_pipeline(no_ai: bool = False) -> None:
     from engine.size_ratio import compute_size_ratios
     size_products = compute_size_ratios(enriched, wc_categories, wc_sku_size_map)
     stockout_count = sum(
-        1 for p in size_products for s in p["sizes"] if s["health_flag"] == "💀 SIZE_STOCKOUT"
+        1 for p in size_products for s in p["sizes"] if s["health_flag"] == "💀 STOCKOUT"
     )
     print(f"Done. {len(size_products)} parent SKUs, {stockout_count} size stockouts.")
-
-    if no_ai:
-        print("Skipping Claude size analysis (--no-ai).")
-        from engine.intelligence import merge_size_analysis
-        merge_size_analysis(size_products, None)
-    elif size_products:
-        print(f"Getting Claude size analysis for {len(size_products)} parent SKUs...", end=" ", flush=True)
-        from engine.intelligence import get_size_analysis, merge_size_analysis
-        size_analysis = get_size_analysis(size_products)
-        if size_analysis is None:
-            print("FAILED — proceeding without size analysis.")
-        else:
-            print(f"Done. {len(size_analysis)} analyses received.")
-        merge_size_analysis(size_products, size_analysis)
-    else:
-        print("No multi-size parent SKUs found — skipping size analysis.")
 
     # ── 9. Dead Stock Kill Chain scoring + Claude exit strategy ───────────────
     print("Scoring dead stock (Kill Chain)...", end=" ", flush=True)
@@ -358,7 +342,7 @@ def run_pipeline(no_ai: bool = False) -> None:
         len(warning_skus_final),
         sum(1 for s in enriched if s.get("hold_for_review")),
         len(size_products),
-        sum(1 for p in size_products for s in p["sizes"] if s["health_flag"] == "💀 SIZE_STOCKOUT"),
+        sum(1 for p in size_products for s in p["sizes"] if s["health_flag"] == "💀 STOCKOUT"),
         len(dead_stock_skus),
         kc_blocked,
     )
