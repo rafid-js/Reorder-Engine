@@ -210,7 +210,7 @@ def _prepare_reorder_payload(skus: list[dict]) -> list[dict[str, Any]]:
             "raw_velocity_14d": s.get("raw_velocity_14d", 0.0),
             "net_velocity_14d": s.get("net_velocity_14d", 0.0),
             "net_velocity_7d": s.get("net_velocity_7d", 0.0),
-            "return_rate_30d": s.get("return_rate_30d", config.RETURN_RATE_FALLBACK),
+            "return_rate_30d": s.get("return_rate_30d", 0.0),
             "days_remaining": s.get("days_remaining", 9999),
             "true_demand": s.get("true_demand", 0),
             "last_purchase_price_bdt": s.get("last_purchase_price", 0.0),

@@ -5,7 +5,7 @@ Computes for each SKU:
   return_rate_30d = flagged_30d / gross_orders_30d
   return_rate_7d  = flagged_7d  / gross_orders_7d
 
-  Fallback for new products (no flagged history): RETURN_RATE_FALLBACK = 0.35
+  No return data (new product or no sales): 0% — computed from real data only.
 
 Early Warning Signal:
   Triggered when: return_rate_7d - return_rate_30d > RETURN_EARLY_WARNING_THRESHOLD (10pp)
@@ -81,12 +81,10 @@ def compute_return_rates(
         # ── Return rate 30d ───────────────────────────────────────────────────
         if has_return_data and gross_orders_30d > 0:
             return_rate_30d = min(flagged_30d / gross_orders_30d, 1.0)
-        elif gross_orders_30d == 0:
-            # No sales → no returns possible; 0% not 35% fallback
-            return_rate_30d = 0.0
         else:
-            # Has sales but no return data (new product) → conservative fallback
-            return_rate_30d = config.RETURN_RATE_FALLBACK
+            # No sales, or has sales but no return data yet → 0%
+            # Return rate is calculated from real data only; no fixed fallback
+            return_rate_30d = 0.0
 
         # ── Return rate 7d ────────────────────────────────────────────────────
         if gross_orders_7d > 0 and flagged_7d > 0:

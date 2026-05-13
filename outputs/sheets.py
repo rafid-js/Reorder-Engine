@@ -97,7 +97,7 @@ def _return_warning_cell(sku_data: dict) -> str:
 
 
 def _row_for_sku(sku_data: dict, updated_at: str) -> list:
-    return_rate = sku_data.get("return_rate_30d", config.RETURN_RATE_FALLBACK)
+    return_rate = sku_data.get("return_rate_30d", 0.0)
     hold = sku_data.get("hold_for_review", False)
     high_risk = sku_data.get("high_return_risk", False)
 
@@ -224,7 +224,7 @@ def write_to_sheets(all_skus: list[dict]) -> None:
             })
 
             # Per-cell override on Return Rate % column
-            return_rate = sku_data.get("return_rate_30d", config.RETURN_RATE_FALLBACK)
+            return_rate = sku_data.get("return_rate_30d", 0.0)
             if return_rate > config.RETURN_HOLD_THRESHOLD:
                 cell_color = _COLOR_CELL_RED
             elif return_rate > config.RETURN_HIGH_RISK_THRESHOLD:
