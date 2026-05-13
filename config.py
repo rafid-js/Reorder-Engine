@@ -120,7 +120,7 @@ CANCEL_RATE = 0.150
 # ── Per-SKU return rate thresholds ────────────────────────────────────────────
 # Return rates are now computed per SKU from Nuport flagged data.
 # RETURN_RATE_FALLBACK is used for new products with no flagged history.
-RETURN_RATE_FALLBACK = 0.35    # conservative default for new/data-less SKUs
+RETURN_RATE_FALLBACK = 0.15    # baseline from years of data; used only when no real return history exists
 
 # Early warning: flag SKU if 7-day rate exceeds 30-day rate by this many points
 RETURN_EARLY_WARNING_THRESHOLD = 0.10   # 10 percentage points

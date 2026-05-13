@@ -81,10 +81,12 @@ def compute_return_rates(
         # ── Return rate 30d ───────────────────────────────────────────────────
         if has_return_data and gross_orders_30d > 0:
             return_rate_30d = min(flagged_30d / gross_orders_30d, 1.0)
-        else:
-            # No sales, or has sales but no return data yet → 0%
-            # Return rate is calculated from real data only; no fixed fallback
+        elif gross_orders_30d == 0:
+            # No sales → no returns possible
             return_rate_30d = 0.0
+        else:
+            # Has sales but no return history yet → use 15% industry baseline
+            return_rate_30d = config.RETURN_RATE_FALLBACK
 
         # ── Return rate 7d ────────────────────────────────────────────────────
         if gross_orders_7d > 0 and flagged_7d > 0:

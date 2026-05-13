@@ -59,7 +59,7 @@ def compute_velocity(merged_skus: list[dict]) -> list[dict]:
         preorder_qty: int = sku_data.get("preorder_qty", 0)
 
         # Per-SKU return rate — set by return_signals.compute_return_rates()
-        return_rate = sku_data.get("return_rate_30d", 0.0)
+        return_rate = sku_data.get("return_rate_30d", config.RETURN_RATE_FALLBACK)
 
         # ── Raw velocity (gross order volume, before any buffering) ───────────
         count_14d = sum(1 for d in order_dates if d is not None and d >= cutoff_14d)
