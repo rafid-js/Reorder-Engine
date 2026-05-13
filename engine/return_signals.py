@@ -81,8 +81,11 @@ def compute_return_rates(
         # ── Return rate 30d ───────────────────────────────────────────────────
         if has_return_data and gross_orders_30d > 0:
             return_rate_30d = min(flagged_30d / gross_orders_30d, 1.0)
+        elif gross_orders_30d == 0:
+            # No sales → no returns possible; 0% not 35% fallback
+            return_rate_30d = 0.0
         else:
-            # New product or no flagged history — conservative fallback
+            # Has sales but no return data (new product) → conservative fallback
             return_rate_30d = config.RETURN_RATE_FALLBACK
 
         # ── Return rate 7d ────────────────────────────────────────────────────

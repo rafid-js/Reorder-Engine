@@ -139,12 +139,19 @@ def pull_orders() -> list[dict]:
     return records
 
 
-def pull_all_skus() -> set[str]:
+def pull_all_skus() -> tuple[set[str], dict[str, str]]:
     """
     Pull every published WooCommerce SKU — parent products + all variations.
 
     Variation fetches are parallelized (up to 10 concurrent threads) so 173
     products take ~5-10 seconds instead of 10+ minutes sequential.
+
+    Returns:
+        (all_skus, sku_size_map)
+        all_skus:     set of all uppercase SKUs in the published catalogue
+        sku_size_map: {variation_sku -> size_string} extracted from WC variation
+                      attributes (e.g. {"34404-53666": "30", "34404-53667": "32"})
+                      Used by size_ratio engine as authoritative size source.
     """
     import threading
     from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -155,10 +162,11 @@ def pull_all_skus() -> set[str]:
         products = _wc_get("products", {"status": "publish"})
     except RuntimeError as exc:
         logger.error("Failed to pull WooCommerce product catalogue: %s", exc)
-        return set()
+        return set(), {}
 
     skus: set[str] = set()
-    skus_lock = threading.Lock()
+    sku_size_map: dict[str, str] = {}
+    lock = threading.Lock()
     variable_ids: list[int] = []
 
     for product in products:
@@ -175,29 +183,48 @@ def pull_all_skus() -> set[str]:
         len(products), len(variable_ids),
     )
 
-    def _fetch_variations(pid: int) -> list[str]:
+    _SIZE_ATTR_NAMES = {"size", "sizes", "সাইজ", "প্যান্ট সাইজ", "shirt size", "pant size"}
+
+    def _fetch_variations(pid: int) -> tuple[list[str], dict[str, str]]:
         try:
             variations = _wc_get(f"products/{pid}/variations")
-            return [(v.get("sku") or "").strip().upper() for v in variations]
         except RuntimeError as exc:
             logger.warning("Failed to pull variations for product %d: %s", pid, exc)
-            return []
+            return [], {}
+
+        v_skus: list[str] = []
+        v_sizes: dict[str, str] = {}
+        for v in variations:
+            v_sku = (v.get("sku") or "").strip().upper()
+            if not v_sku:
+                continue
+            v_skus.append(v_sku)
+            for attr in v.get("attributes", []):
+                if attr.get("name", "").strip().lower() in _SIZE_ATTR_NAMES:
+                    size_val = (attr.get("option") or "").strip().upper()
+                    if size_val:
+                        v_sizes[v_sku] = size_val
+                    break
+        return v_skus, v_sizes
 
     with ThreadPoolExecutor(max_workers=10) as executor:
         futures = {executor.submit(_fetch_variations, pid): pid for pid in variable_ids}
         done = 0
         for future in as_completed(futures):
-            variation_skus = future.result()
-            with skus_lock:
+            variation_skus, variation_sizes = future.result()
+            with lock:
                 for v_sku in variation_skus:
-                    if v_sku:
-                        skus.add(v_sku)
+                    skus.add(v_sku)
+                sku_size_map.update(variation_sizes)
             done += 1
             if done % 20 == 0 or done == len(variable_ids):
                 logger.info("  Variations: %d/%d products fetched...", done, len(variable_ids))
 
-    logger.info("Full WooCommerce catalogue: %d unique SKUs (parents + variations).", len(skus))
-    return skus
+    logger.info(
+        "Full WooCommerce catalogue: %d unique SKUs, %d with size attributes.",
+        len(skus), len(sku_size_map),
+    )
+    return skus, sku_size_map
 
 
 def pull_product_categories() -> dict[str, str]:

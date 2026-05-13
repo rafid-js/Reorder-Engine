@@ -44,6 +44,7 @@ def run_pipeline(no_ai: bool = False) -> None:
     # ── 1. Pull data ──────────────────────────────────────────────────────────
     wc_orders = []
     wc_all_skus: set[str] = set()
+    wc_sku_size_map: dict[str, str] = {}
     nuport_shipments = []
     nuport_preorders = {}
     nuport_flagged = {}
@@ -64,12 +65,13 @@ def run_pipeline(no_ai: bool = False) -> None:
 
     print("Pulling WooCommerce full product catalogue (parents + variations)...", end=" ", flush=True)
     try:
-        wc_all_skus = pull_all_skus()
-        print(f"Done. {len(wc_all_skus)} total SKUs in catalogue.")
+        wc_all_skus, wc_sku_size_map = pull_all_skus()
+        print(f"Done. {len(wc_all_skus)} total SKUs, {len(wc_sku_size_map)} with size attributes.")
     except Exception as exc:
         print("FAILED (non-fatal — falling back to order-based SKUs).")
         logger.warning("WooCommerce full catalogue pull failed: %s", exc)
         wc_all_skus = set()
+        wc_sku_size_map = {}
 
     print("Pulling WooCommerce product categories...", end=" ", flush=True)
     try:
@@ -229,7 +231,7 @@ def run_pipeline(no_ai: bool = False) -> None:
     # ── 8. Size Ratio Optimization Engine ─────────────────────────────────────
     print("Computing size ratios...", end=" ", flush=True)
     from engine.size_ratio import compute_size_ratios
-    size_products = compute_size_ratios(enriched, wc_categories)
+    size_products = compute_size_ratios(enriched, wc_categories, wc_sku_size_map)
     stockout_count = sum(
         1 for p in size_products for s in p["sizes"] if s["health_flag"] == "💀 SIZE_STOCKOUT"
     )

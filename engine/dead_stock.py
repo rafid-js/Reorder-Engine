@@ -119,6 +119,17 @@ def _score_return_rate(rate: float) -> int:
     return 15
 
 
+def _score_units_stuck(units: int) -> int:
+    """Capital pressure signal — more units locked = higher urgency (max 15pts)."""
+    if units <= 3:
+        return 0
+    if units <= 10:
+        return 5
+    if units <= 30:
+        return 10
+    return 15
+
+
 # ── Stage + financial helpers ─────────────────────────────────────────────────
 
 def _kill_chain_stage(score: int) -> str | None:
@@ -231,10 +242,13 @@ def compute_dead_stock(enriched_skus: list[dict]) -> list[dict]:
         s4 = _score_velocity_trend(vel_7d, vel_14d)
 
         # ── Signal 5: Return rate (15pts) ─────────────────────────────────────
-        return_rate = sku_data.get("return_rate_30d", config.RETURN_RATE_FALLBACK) or 0.0
+        return_rate = sku_data.get("return_rate_30d", 0.0) or 0.0
         s5 = _score_return_rate(return_rate)
 
-        score = s1 + s2 + s3 + s4 + s5
+        # ── Signal 6: Units stuck / capital pressure (15pts) ──────────────────
+        s6 = _score_units_stuck(current_stock)
+
+        score = s1 + s2 + s3 + s4 + s5 + s6
         stage = _kill_chain_stage(score)
 
         # ── Financial impact ──────────────────────────────────────────────────
@@ -282,9 +296,14 @@ def compute_dead_stock(enriched_skus: list[dict]) -> list[dict]:
 
     _save_stock_age(new_age_history)
 
-    # Sort: Liquidate first, then Bundle, Markdown, Watch; within stage by score desc
+    # Sort: Liquidate → Bundle → Markdown → Watch
+    # Within stage: most capital locked first, then score desc
     _order = {LIQUIDATE: 0, BUNDLE: 1, MARKDOWN: 2, WATCH: 3}
-    dead_stock.sort(key=lambda s: (_order.get(s["kill_chain_stage"], 9), -s["dead_stock_score"]))
+    dead_stock.sort(key=lambda s: (
+        _order.get(s["kill_chain_stage"], 9),
+        -s.get("capital_locked", 0),
+        -s["dead_stock_score"],
+    ))
 
     liq = sum(1 for s in dead_stock if s["kill_chain_stage"] == LIQUIDATE)
     bun = sum(1 for s in dead_stock if s["kill_chain_stage"] == BUNDLE)

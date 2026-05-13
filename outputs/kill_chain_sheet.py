@@ -7,12 +7,15 @@ Tab: "Kill Chain"
 - Capital Recovery Summary section appended at the bottom after every run
 """
 
+import re
 from datetime import datetime
 
 import gspread
 from google.oauth2.service_account import Credentials
 
 import config
+
+_NAME_SIZE_RE = re.compile(r"\s*-\s*(\S+)\s*$")
 from config import logger
 from engine.dead_stock import LIQUIDATE, BUNDLE, MARKDOWN, WATCH
 
@@ -60,12 +63,14 @@ def _get_client() -> gspread.Client:
     return gspread.authorize(creds)
 
 
-def _parse_size(sku: str) -> str:
-    """Extract size token from sub-SKU, or empty string."""
+def _parse_size(sku: str, product_name: str = "") -> str:
+    """Extract size from SKU suffix (XL/M/L) or product name trailing token (30/32/M/L)."""
     parts = sku.split("-")
     if len(parts) >= 2 and parts[-1].upper() in config.KNOWN_SIZES:
         return parts[-1].upper()
-    return ""
+    # Numeric variant ID pattern — size lives in product name e.g. "... - 30"
+    m = _NAME_SIZE_RE.search(product_name.strip()) if product_name else None
+    return m.group(1).upper() if m else ""
 
 
 def _suggested_action_text(sku_data: dict) -> str:
@@ -89,10 +94,17 @@ def _data_row(sku_data: dict) -> list:
     stage_label = sku_data.get("kill_chain_stage_label", stage)
     claude_rec = sku_data.get("claude_exit_action", "") or sku_data.get("claude_ops_instruction", "")
 
+    raw_name = sku_data.get("product_name", "")
+    # If product_name was never set, it falls back to the SKU string — show blank instead
+    display_name = raw_name if raw_name != sku_data.get("sku", "") else ""
+    # Strip trailing " - Size" from name so it reads cleanly
+    clean_name = _NAME_SIZE_RE.sub("", display_name).strip() if display_name else ""
+    size = _parse_size(sku_data.get("sku", ""), raw_name)
+
     return [
         sku_data.get("sku", ""),
-        sku_data.get("product_name", ""),
-        _parse_size(sku_data.get("sku", "")),
+        clean_name,
+        size,
         sku_data.get("dead_stock_score", 0),
         stage_label,
         sku_data.get("days_since_last_sale", 0),

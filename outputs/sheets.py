@@ -27,12 +27,12 @@ _SCOPES = [
 _HEADERS = [
     "SKU",
     "Product Name",
+    "30d Orders",
     "Current Stock",
     "Gross Velocity (14d)",
     "Return Rate %",
     "Net Velocity (14d)",
     "Days Remaining",
-    "True Demand",
     "Urgency",
     "Reorder Qty",
     "Est. Cost (BDT)",
@@ -120,18 +120,22 @@ def _row_for_sku(sku_data: dict, updated_at: str) -> list:
     days = sku_data.get("days_remaining", 9999)
     days_display = "∞" if days >= 9999 else str(days)
 
+    reorder_qty = sku_data.get("claude_recommended_qty") or sku_data.get("reorder_qty", 0)
+    purchase_price = sku_data.get("last_purchase_price", 0.0) or 0.0
+    estimated_cost = round(reorder_qty * purchase_price, 0) if purchase_price else ""
+
     return [
         sku_data.get("sku", ""),
         sku_data.get("product_name", ""),
+        sku_data.get("total_ordered", 0),
         sku_data.get("current_stock", 0),
         round(sku_data.get("raw_velocity_14d", 0.0), 2),
         _return_rate_cell_value(return_rate, hold, high_risk),
         round(sku_data.get("net_velocity_14d", 0.0), 2),
         days_display,
-        sku_data.get("true_demand", 0),
         sku_data.get("urgency_tier", "HEALTHY"),
-        sku_data.get("claude_recommended_qty") or sku_data.get("reorder_qty", 0),
-        sku_data.get("estimated_cost", 0.0),
+        reorder_qty,
+        estimated_cost,
         _return_warning_cell(sku_data),
         recommendation,
         updated_at,
@@ -142,9 +146,11 @@ def write_to_sheets(all_skus: list[dict]) -> None:
     """
     Overwrite the Reorder Queue sheet with current SKU data.
 
-    Sort order: CRITICAL → WARNING → HEALTHY, then by days_remaining ascending.
-    Row color: urgency tier.
-    Return Rate % cell: orange (>40%) or red (>50%) overrides row color on that cell.
+    Sort order: best-selling (30d orders) descending — top sellers at the top
+    so you can easily scan top 100/200 products. Urgency tier is shown as a
+    column but is NOT the primary sort — sales volume is.
+    Row color: urgency tier (red=critical, yellow=warning, green=healthy).
+    Return Rate % cell: orange (>40%) or red (>50%) overrides row color.
     """
     logger.info("Writing to Google Sheets...")
 
@@ -161,11 +167,12 @@ def write_to_sheets(all_skus: list[dict]) -> None:
 
         updated_at = datetime.now().strftime("%Y-%m-%d %H:%M BST")
 
-        _tier_order = {"CRITICAL": 0, "WARNING": 1, "HEALTHY": 2}
+        # Primary sort: 30d orders descending (best sellers first)
+        # Secondary: days remaining ascending (most urgent within same sales volume)
         sorted_skus = sorted(
             all_skus,
             key=lambda s: (
-                _tier_order.get(s.get("urgency_tier", "HEALTHY"), 2),
+                -s.get("total_ordered", 0),
                 s.get("days_remaining", 9999),
             ),
         )

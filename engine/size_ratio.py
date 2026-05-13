@@ -73,15 +73,20 @@ def _extract_size_from_name(product_name: str) -> str | None:
     return m.group(1).upper() if m else None
 
 
-def parse_size_variant(sku: str, product_name: str = "") -> tuple[str, str] | None:
+def parse_size_variant(
+    sku: str,
+    product_name: str = "",
+    size_map: dict[str, str] | None = None,
+) -> tuple[str, str] | None:
     """
     Extract (parent_sku, size) from a size-variant SKU.
 
     Pattern A — text size token in SKU:
         "TS-042-XL"   -> ("TS-042", "XL")
 
-    Pattern B — numeric WooCommerce variation ID in SKU, size in product name:
-        "34404-53666" with name "... - 30" -> ("34404", "30")
+    Pattern B — numeric WooCommerce variation ID, size resolved by priority:
+        1. WC variation attributes via size_map (most reliable)
+        2. Product name trailing token e.g. "... - 30"
 
     Returns None if neither pattern matches.
     """
@@ -90,16 +95,21 @@ def parse_size_variant(sku: str, product_name: str = "") -> tuple[str, str] | No
         return None
 
     last = parts[-1].upper()
+    parent = "-".join(parts[:-1])
 
     # Pattern A: last segment is a known size token
     if last in config.KNOWN_SIZES:
-        return "-".join(parts[:-1]), last
+        return parent, last
 
     # Pattern B: last segment is a 4+ digit numeric variant ID
     if _VARIANT_ID_RE.match(parts[-1]):
+        # Priority 1: WC variation attributes (from pull_all_skus)
+        if size_map and sku in size_map and size_map[sku]:
+            return parent, size_map[sku]
+        # Priority 2: product name suffix
         size = _extract_size_from_name(product_name)
         if size:
-            return "-".join(parts[:-1]), size
+            return parent, size
 
     return None
 
@@ -117,6 +127,7 @@ def _size_sort_key(size: str) -> tuple:
 def compute_size_ratios(
     enriched_skus: list[dict],
     product_categories: dict[str, str],
+    sku_size_map: dict[str, str] | None = None,
 ) -> list[dict]:
     """
     Group size-variant sub-SKUs by parent SKU and compute per-size analysis.
@@ -143,10 +154,10 @@ def compute_size_ratios(
     # Build lookup: sku -> enriched dict
     sku_map: dict[str, dict] = {s["sku"]: s for s in enriched_skus}
 
-    # Group sub-SKUs by parent — pass product_name so numeric variant IDs resolve
+    # Group sub-SKUs by parent — use WC size_map as authoritative source, then product name
     groups: dict[str, list[str]] = defaultdict(list)
     for sku, data in sku_map.items():
-        parsed = parse_size_variant(sku, data.get("product_name", ""))
+        parsed = parse_size_variant(sku, data.get("product_name", ""), sku_size_map)
         if parsed:
             parent, _ = parsed
             groups[parent].append(sku)
@@ -172,14 +183,13 @@ def compute_size_ratios(
 
         for sub_sku in sub_skus:
             sub_data = sku_map[sub_sku]
-            parsed = parse_size_variant(sub_sku, sub_data.get("product_name", ""))
+            parsed = parse_size_variant(sub_sku, sub_data.get("product_name", ""), sku_size_map)
             if not parsed:
                 continue
             _, size = parsed
             s = sku_map[sub_sku]
 
             net_vel = s.get("net_velocity_14d") or s.get("daily_velocity_14d", 0.0)
-            # Units sold over the size velocity window
             units_14d = net_vel * config.SIZE_VELOCITY_WINDOW
             current_stock = s.get("current_stock", 0)
             days_rem = s.get("days_remaining", 9999)
@@ -190,6 +200,7 @@ def compute_size_ratios(
                 "current_stock": current_stock,
                 "net_velocity_14d": net_vel,
                 "size_units_14d": round(units_14d, 2),
+                "total_ordered_30d": s.get("total_ordered", 0),
                 "days_remaining": days_rem,
                 "reorder_qty": s.get("reorder_qty", 0),
             })
@@ -248,6 +259,7 @@ def compute_size_ratios(
                 "size": size,
                 "sku": d["sku"],
                 "current_stock": current_stock,
+                "total_ordered_30d": d.get("total_ordered_30d", 0),
                 "net_velocity_14d": round(net_vel, 4),
                 "size_units_14d": units_14d,
                 "size_ratio_pct": round(ratio_pct, 1),

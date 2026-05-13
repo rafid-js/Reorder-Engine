@@ -26,18 +26,13 @@ _HEADERS = [
     "Product Name",
     "Category",
     "Size",
-    "Sub-SKU",
-    "Current Stock",
-    "Net Velocity (14d)",
-    "Units Sold (14d)",
+    "Sales (30d)",
     "Size Ratio %",
-    "Sell-Through %",
+    "Current Stock",
     "Days Remaining",
-    "Suggested Qty",
-    "Prev. Suggested",
+    "Suggested Order Qty",
     "Change vs Last",
-    "Health Flag",
-    "Claude Notes",
+    "Health",
 ]
 
 # Health flag → background color (RGB 0-1 scale)
@@ -63,67 +58,53 @@ def _get_client() -> gspread.Client:
     return gspread.authorize(creds)
 
 
-def _size_row(parent: dict, size: dict, updated_at: str) -> list:
+def _size_row(parent: dict, size: dict) -> list:
     change = size.get("change_vs_last")
     change_str = "" if change is None else (f"+{change}" if change >= 0 else str(change))
-    prev = size.get("previous_qty")
-    prev_str = "" if prev is None else str(prev)
+    days = size.get("days_remaining", 9999)
+    days_display = "OUT" if days <= 0 else ("∞" if days >= 9999 else days)
 
     return [
         parent["parent_sku"],
         parent["product_name"],
         parent["category"],
         size["size"],
-        size["sku"],
-        size["current_stock"],
-        size["net_velocity_14d"],
-        size["size_units_14d"],
+        size.get("total_ordered_30d", 0),
         size["size_ratio_pct"],
-        size["sell_through_pct"],
-        "OUT" if size["days_remaining"] <= 0 else size["days_remaining"],
+        size["current_stock"],
+        days_display,
         size["suggested_qty"],
-        prev_str,
         change_str,
         size["health_flag"],
-        size.get("claude_size_note", ""),
     ]
 
 
 def _production_brief_rows(size_products: list[dict]) -> list[list]:
-    """Build the Production Brief section rows appended after all data."""
+    """Production Brief — one row per product showing size ratio breakdown."""
     rows: list[list] = [
         [],
-        ["=== PRODUCTION BRIEF ==="],
-        [f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}"],
+        [f"=== PRODUCTION BRIEF — {datetime.now().strftime('%Y-%m-%d %H:%M')} ==="],
         [],
-        ["Parent SKU", "Product", "Category", "Total Order", "Size Breakdown"],
+        ["Parent SKU", "Product", "Category", "Total Order Qty", "Size Ratio Breakdown"],
     ]
     for parent in size_products:
         if not parent.get("total_reorder_qty"):
             continue
-        breakdown_parts = []
+        total_vel = parent.get("total_velocity", 0) or 1
+        parts = []
         for size in parent["sizes"]:
             qty = size["suggested_qty"]
+            ratio = size["size_ratio_pct"]
             flag = size["health_flag"]
-            flag_char = ""
-            if "STOCKOUT" in flag:
-                flag_char = "💀"
-            elif "FAST" in flag:
-                flag_char = "🔥"
-            elif "SLOW" in flag:
-                flag_char = "🧊"
-            elif "OVERSTOCK" in flag:
-                flag_char = "⚠️"
-            breakdown_parts.append(f"{size['size']}: {qty}{flag_char}")
-
+            icon = "💀" if "STOCKOUT" in flag else ("🔥" if "FAST" in flag else ("🧊" if "SLOW" in flag else ""))
+            parts.append(f"{size['size']}: {qty} ({ratio}%){icon}")
         rows.append([
             parent["parent_sku"],
             parent["product_name"],
             parent["category"],
             parent["total_reorder_qty"],
-            "  |  ".join(breakdown_parts),
+            "  |  ".join(parts),
         ])
-
     return rows
 
 
@@ -153,17 +134,14 @@ def write_size_sheet(size_products: list[dict]) -> None:
                 title=config.SHEETS_SIZE_TAB_NAME, rows=2000, cols=len(_HEADERS)
             )
 
-        updated_at = datetime.now().strftime("%Y-%m-%d %H:%M BST")
-
         # Build all cell rows and track formatting metadata
         rows: list[list] = [_HEADERS]
-        # track (row_idx_0based, health_flag) for color formatting
         data_row_meta: list[tuple[int, str]] = []
 
         for parent in size_products:
             for size in parent["sizes"]:
                 row_0 = len(rows)
-                rows.append(_size_row(parent, size, updated_at))
+                rows.append(_size_row(parent, size))
                 data_row_meta.append((row_0, size["health_flag"]))
 
         # Append production brief
@@ -211,8 +189,8 @@ def write_size_sheet(size_products: list[dict]) -> None:
                 }
             })
 
-        # Production brief header row color
-        brief_header_row = brief_start_row + 4  # blank + title + date + blank + column headers
+        # Production brief header row color: blank + title + blank + column headers = +3
+        brief_header_row = brief_start_row + 3
         if brief_header_row < len(rows):
             req.append({
                 "repeatCell": {
